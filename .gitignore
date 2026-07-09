@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.env
+venv/
+.venv/
+
+# Bot data
+data/
+backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# PID files
+*.pid
+
+# Config
+config.json
+config.local.json
+
+# Isolated opencode data (bot sessions, separate from user's own opencode)
+opencode_data/

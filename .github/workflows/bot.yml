@@ -1,0 +1,184 @@
+# Kaufy Discord Bot — GitHub Actions Workflow
+# 
+# Runs the bot on GitHub's free runners with a 2000-minute monthly cap.
+# Each run lasts ~5.5 hours (under the 6h job limit), backs up DBs,
+# and self-triggers the next run via workflow_dispatch.
+# 
+# When monthly minutes approach 2000, the bot shuts down gracefully
+# and waits for the next month to continue.
+#
+# Secrets required:
+#   DISCORD_TOKEN   — Discord bot token
+#   GH_PAT          — GitHub PAT with repo & workflow scopes (for self-trigger)
+#   OWNER_IDS       — Discord user IDs (comma separated)
+#   GUILD_ID        — Discord guild/server ID
+#
+name: Kaufy Bot
+
+on:
+  workflow_dispatch:          # Manual trigger + self-trigger loop
+  schedule:
+    - cron: "0 */6 * * *"    # Every 6 hours as safety net
+  repository_dispatch:        # Can be triggered from other workflows
+    types: [restart-bot]
+
+env:
+  # These are set via repo secrets; fallbacks for local testing
+  DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+  OWNER_IDS: ${{ secrets.OWNER_IDS }}
+  GUILD_ID: ${{ secrets.GUILD_ID }}
+  GH_PAT: ${{ secrets.GH_PAT }}
+  # Config
+  KAUFY_RESTART_INTERVAL: 19800    # 5h30min (under 6h limit)
+  BACKUP_BRANCH: data              # Branch name for DB backups
+  MONTHLY_LIMIT_MINUTES: 1900      # Stop at 1900 min (leave 100 min buffer)
+
+# Only one run at a time to avoid DB conflicts
+concurrency:
+  group: kaufy-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355    # 5h55min (just under 6h limit)
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history needed for data branch
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt 2>/dev/null || \
+            pip install discord.py aiohttp aiosqlite
+
+      - name: Restore database from git backup
+        run: |
+          git config user.name "kaufy-bot"
+          git config user.email "bot@kaufy.local"
+          
+          # Try to fetch and checkout the data branch
+          if git fetch origin $BACKUP_BRANCH 2>/dev/null; then
+            echo "Restoring databases from $BACKUP_BRANCH branch..."
+            git checkout $BACKUP_BRANCH -- data/ 2>/dev/null || true
+            git checkout $BACKUP_BRANCH -- backups/ 2>/dev/null || true
+            git checkout main 2>/dev/null || true
+            echo "✅ Databases restored from backup branch"
+          else
+            echo "No backup branch found, starting fresh"
+            mkdir -p data/user_dbs data/backups
+          fi
+
+      - name: Check monthly minutes usage
+        id: check_minutes
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          echo "Checking GitHub Actions billing for $REPO..."
+          
+          RESPONSE=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/billing")
+          
+          USED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_minutes_used', 0))" 2>/dev/null || echo 0)
+          INCLUDED=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('included_minutes', 2000))" 2>/dev/null || echo 2000)
+          
+          echo "used=$USED" >> $GITHUB_OUTPUT
+          echo "included=$INCLUDED" >> $GITHUB_OUTPUT
+          echo "remaining=$((INCLUDED - USED))" >> $GITHUB_OUTPUT
+          
+          echo "Minutes used this month: $USED / $INCLUDED"
+          echo "Remaining: $((INCLUDED - USED))"
+
+      - name: Run Kaufy Bot
+        id: run_bot
+        env:
+          KAUFY_RUN_MODE: github_actions
+          MONTHLY_MINUTES_USED: ${{ steps.check_minutes.outputs.used }}
+          MONTHLY_MINUTES_INCLUDED: ${{ steps.check_minutes.outputs.included }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || github.token }}
+        run: |
+          # Set shutdown threshold
+          THRESHOLD=${{ env.MONTHLY_LIMIT_MINUTES }}
+          REMAINING=$(( ${{ steps.check_minutes.outputs.included }} - ${{ steps.check_minutes.outputs.used }} ))
+          
+          if [ $REMAINING -lt 60 ]; then
+            echo "❌ Only $REMAINING minutes remaining this month. Stopping to avoid ban."
+            echo "status=limit_reached" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          if [ $REMAINING -lt $THRESHOLD ]; then
+            echo "⚠️  Under threshold ($REMAINING < $THRESHOLD). This will be the last run this month."
+          fi
+          
+          echo "Starting bot (remaining minutes: $REMAINING)..."
+          
+          # Run the bot in GitHub Actions mode
+          # It will auto-restart every 5.5h and backup DBs
+          python3 -m bot.github_main
+          
+          EXIT_CODE=$?
+          echo "Bot exited with code $EXIT_CODE"
+          echo "status=completed" >> $GITHUB_OUTPUT
+
+      - name: Backup databases to git
+        if: always()
+        run: |
+          git config user.name "kaufy-bot"
+          git config user.email "bot@kaufy.local"
+          
+          # Commit DB changes to data branch
+          git checkout -b $BACKUP_BRANCH 2>/dev/null || git checkout $BACKUP_BRANCH
+          
+          if [ -d "data" ]; then
+            git add -f data/ backups/ 2>/dev/null || true   # -f to override .gitignore
+            if git diff --cached --quiet; then
+              echo "No database changes to backup"
+            else
+              git commit -m "Auto-backup $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              git push origin $BACKUP_BRANCH || echo "⚠️ Push failed (will retry next run)"
+              echo "✅ Databases backed up to $BACKUP_BRANCH branch"
+            fi
+          fi
+          
+          # Switch back to main
+          git checkout main 2>/dev/null || true
+
+      - name: Trigger next run (if within limits)
+        if: steps.check_minutes.outputs.remaining > 60 && steps.run_bot.outputs.status != 'limit_reached'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Triggering next workflow run..."
+          REPO="${{ github.repository }}"
+          
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO/actions/workflows/bot.yml/dispatches" \
+            -d '{"ref":"main"}' \
+            || echo "⚠️ Failed to trigger next run (will be picked up by cron)"
+          
+          echo "✅ Next run triggered via workflow_dispatch"
+
+      - name: Summarize
+        if: always()
+        run: |
+          echo "========================"
+          echo "📊 Run Summary"
+          echo "========================"
+          echo "Minutes used this month: ${{ steps.check_minutes.outputs.used }}"
+          echo "Minutes included: ${{ steps.check_minutes.outputs.included }}"
+          echo "Minutes remaining: ${{ steps.check_minutes.outputs.remaining }}"
+          echo "Bot status: ${{ steps.run_bot.outputs.status }}"
+          echo "========================"
