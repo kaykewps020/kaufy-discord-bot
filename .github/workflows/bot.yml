@@ -56,12 +56,14 @@ jobs:
           cache: 'pip'
 
       - name: Install opencode
+        shell: bash
         run: |
           # Use cache for opencode binary
           OPENCODE_DIR="$HOME/.opencode"
           if [ ! -f "$OPENCODE_DIR/bin/opencode" ]; then
             echo "Installing opencode..."
-            curl -fsSL https://opencode.ai/install | sh -s -- --no-modify-path
+            # Use bash explicitly (install script requires bash for pipefail)
+            curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
             # Move to a known location
             mkdir -p "$OPENCODE_DIR/bin"
             # Find the installed binary
