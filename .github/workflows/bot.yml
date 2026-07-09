@@ -55,7 +55,26 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install opencode
+        run: |
+          # Use cache for opencode binary
+          OPENCODE_DIR="$HOME/.opencode"
+          if [ ! -f "$OPENCODE_DIR/bin/opencode" ]; then
+            echo "Installing opencode..."
+            curl -fsSL https://opencode.ai/install | sh -s -- --no-modify-path
+            # Move to a known location
+            mkdir -p "$OPENCODE_DIR/bin"
+            # Find the installed binary
+            INSTALLED=$(find /usr/local/bin /usr/bin $HOME -name "opencode" -type f 2>/dev/null | head -1)
+            if [ -n "$INSTALLED" ]; then
+              cp "$INSTALLED" "$OPENCODE_DIR/bin/opencode"
+            fi
+          else
+            echo "opencode already cached"
+          fi
+          echo "$OPENCODE_DIR/bin" >> $GITHUB_PATH
+
+      - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt 2>/dev/null || \
