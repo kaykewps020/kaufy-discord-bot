@@ -59,22 +59,15 @@ jobs:
         shell: bash
         run: |
           # Use cache for opencode binary
-          OPENCODE_DIR="$HOME/.opencode"
-          if [ ! -f "$OPENCODE_DIR/bin/opencode" ]; then
+          OPENCODE_DIR="$HOME/.opencode/bin"
+          if [ ! -f "$OPENCODE_DIR/opencode" ]; then
             echo "Installing opencode..."
             # Use bash explicitly (install script requires bash for pipefail)
             curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
-            # Move to a known location
-            mkdir -p "$OPENCODE_DIR/bin"
-            # Find the installed binary
-            INSTALLED=$(find /usr/local/bin /usr/bin $HOME -name "opencode" -type f 2>/dev/null | head -1)
-            if [ -n "$INSTALLED" ]; then
-              cp "$INSTALLED" "$OPENCODE_DIR/bin/opencode"
-            fi
           else
             echo "opencode already cached"
+            echo "$OPENCODE_DIR" >> $GITHUB_PATH
           fi
-          echo "$OPENCODE_DIR/bin" >> $GITHUB_PATH
 
       - name: Install Python dependencies
         run: |
