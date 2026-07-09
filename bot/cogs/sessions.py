@@ -105,16 +105,32 @@ class SessionCog(commands.Cog):
                 # Run Kaufy (concurrent semaphore for RAM management)
                 async with self._ai_semaphore:
                     runner = KaufyRunner(author.id, db)
-                    response = await runner.run(
+                    # Owner check: identity is Discord-verified AND must have
+                    # authenticated with the owner secret this session.
+                    from bot.services.owner_auth import owner_auth
+                    is_owner = await owner_auth.is_owner(author.id, via_secret=True)
+
+                    response, files = await runner.run(
                         message.content,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        username=str(author),
+                        is_owner=is_owner,
                     )
                     # Force cleanup after response
                     await runner.stop()
 
-                # Send response
-                await self._send_response(channel, response, message)
+                # Send response (+ any files the model produced)
+                from pathlib import Path as _Path
+                file_objs = []
+                for fpath in files or []:
+                    p = _Path(fpath)
+                    if p.is_file():
+                        try:
+                            file_objs.append(discord.File(str(p)))
+                        except Exception as e:
+                            logger.error(f"Failed to attach file {fpath}: {e}")
+                await self._send_response(channel, response, message, files=file_objs if file_objs else None)
 
                 # Replace loading reaction with checkmark
                 try:
@@ -164,15 +180,17 @@ class SessionCog(commands.Cog):
         await self._queue.put((message, message.channel, message.author, db))
         await message.add_reaction(EMOJI_LOADING)  # custom loading emoji
 
-    async def _send_response(self, channel: discord.TextChannel, response: str, original: discord.Message):
-        """Send response, splitting if necessary."""
+    async def _send_response(self, channel: discord.TextChannel, response: str, original: discord.Message, files=None):
+        """Send response, splitting if necessary and attaching files."""
+        if files is None:
+            files = []
         if len(response) <= 2000:
-            await channel.send(response, reference=original)
+            await channel.send(response, reference=original, files=files)
         else:
             chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    await channel.send(chunk, reference=original)
+                    await channel.send(chunk, reference=original, files=files)
                 else:
                     await channel.send(f"(continued)\n{chunk}")
                 await asyncio.sleep(0.5)

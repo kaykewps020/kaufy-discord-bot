@@ -17,10 +17,32 @@ from bot.utils.helpers import format_uptime
 
 logger = logging.getLogger("kaufy.owner")
 
-def is_owner():
-    """Check if user is an owner."""
+def is_owner(*, via_secret: bool = True):
+    """Owner-access check used as a command guard.
+
+    via_secret=True (default & secure): caller must be a real owner ID *and*
+    have unlocked privileged mode by running .ownerauth <secret> this session.
+    This prevents anyone from impersonating the owner: even a genuine owner
+    ID must prove knowledge of OWNER_SECRET before privileged actions work.
+
+    via_secret=False: legacy ID-only check (used by non-sensitive paths).
+    """
+    from bot.services.owner_auth import owner_auth
+
     async def predicate(ctx: commands.Context):
-        return ctx.author.id in Config.OWNER_IDS
+        ok = await owner_auth.is_owner(ctx.author.id, via_secret=via_secret)
+        if not ok and via_secret:
+            # Hint the owner to authenticate, without revealing the secret.
+            try:
+                await ctx.reply(
+                    "🔒 Owner powers are locked. Run `.ownerauth <your_secret>` "
+                    "first to unlock this session.",
+                    delete_after=15,
+                )
+            except Exception:
+                pass
+        return ok
+
     return commands.check(predicate)
 
 
@@ -32,6 +54,46 @@ class OwnerCog(commands.Cog):
         self.start_time = time.time()
 
     # ─── Help & Panel ──────────────────────────────────────────
+
+    @commands.command(name="ownerauth")
+    async def owner_auth_cmd(self, ctx: commands.Context, *, secret: str = ""):
+        """Unlock privileged owner mode with the owner secret.
+
+        Usage:  .ownerauth <secret>
+        Required once per bot session before owner commands / special reveals
+        work — this is the second factor that stops anyone from impersonating
+        the owner. Only registered owner IDs may authenticate.
+        """
+        from bot.services.owner_auth import owner_auth
+
+        if ctx.author.id not in Config.OWNER_IDS:
+            # Not a registered owner — don't even hint at the secret format.
+            await ctx.reply("⛔ You are not registered as an owner.", delete_after=10)
+            return
+
+        if not secret:
+            await ctx.reply(
+                "Usage: `.ownerauth <your_secret>`", delete_after=10
+            )
+            return
+
+        ok = await owner_auth.authenticate(ctx.author.id, secret)
+        if ok:
+            await ctx.reply(
+                "🔓 Owner privileges unlocked for this session (24h). "
+                "You can now use owner commands and receive internal data.",
+                delete_after=20,
+            )
+        else:
+            await ctx.reply(
+                "❌ Authentication failed. Wrong secret for this owner ID.",
+                delete_after=15,
+            )
+        # Ephemeral-ish: delete the triggering message so the secret doesn't linger
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
 
     @commands.command(name="help")
     async def help_cmd(self, ctx: commands.Context):

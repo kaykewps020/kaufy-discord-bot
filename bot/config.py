@@ -20,6 +20,18 @@ class Config:
     # Run mode: "local" (Termux/start.sh) or "github_actions"
     RUN_MODE = os.getenv("KAUFY_RUN_MODE", "local")
 
+    # ── Owner anti-impersonation ──
+    # OWNER_IDS = Discord IDs of owners (Discord-verified).
+    # OWNER_SECRET = additional second factor. Even a true owner must send
+    # this secret once (via .ownerauth) to unlock owner-only powers.
+    OWNER_SECRET = os.getenv("OWNER_SECRET", "")
+
+    # ── AI runner ──
+    # Per-response timeout for model. 0 / negative = no timeout.
+    AI_TIMEOUT = int(os.getenv("KAUFY_AI_TIMEOUT", "0"))
+    # Directory where the model writes deliverable files (attached to Discord)
+    OUTPUT_DIR = os.getenv("KAUFY_OUTPUT_DIR", "output")
+
     # Session
     SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "600"))  # 10 min
     MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES", "800"))
