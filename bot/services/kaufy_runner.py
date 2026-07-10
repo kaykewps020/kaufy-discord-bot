@@ -136,13 +136,11 @@ class KaufyRunner:
             # agent's command/file writes don't block on a permission prompt that
             # can't be answered headlessly. --dir keeps it inside this user's home.
             # Build options FIRST, then the positional prompt last, otherwise
-            # opencode (yargs) ignores flags placed after plain arguments and
-            # falls back to its built-in default model (xai/grok-3-mini).
+            # opencode (yargs) ignores flags placed after plain arguments.
             cmd = ["opencode", "run"]
             if agent_path:
                 cmd += ["--agent", "kaufy"]
-            # Force the model explicitly so the xai default never wins.
-            cmd += ["--model", Config.MODEL]
+            cmd += ["--model", "opencode/big-pickle"]
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
 
