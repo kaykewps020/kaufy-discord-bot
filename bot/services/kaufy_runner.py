@@ -50,10 +50,10 @@ class KaufyRunner:
         # Ensure the agent & config directories exist
         config_dir = Path(user_home) / ".config" / "opencode"
         (config_dir / "agents").mkdir(parents=True, exist_ok=True)
-        # Create/open opencode.json with model as a STRING (never object form).
+        # Create/open opencode.jsonc with model as a STRING (never object form).
         # Without this, newer opencode versions (≥1.17.18) may internally convert
         # a CLI --model value to {modelID, providerID} and fail Zod validation.
-        config_file = config_dir / "opencode.json"
+        config_file = config_dir / "opencode.jsonc"
         if config_file.exists():
             try:
                 cfg = json.loads(config_file.read_text())

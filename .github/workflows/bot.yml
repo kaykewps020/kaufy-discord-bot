@@ -61,14 +61,22 @@ jobs:
       - name: Install opencode
         shell: bash
         run: |
-          # Use cache for opencode binary
+          # Pin opencode to v1.17.9 — newer versions (≥1.17.18) have a bug where
+          # the model string "opencode/big-pickle" is internally converted to
+          # {modelID, providerID} object and then fails Zod validation.
           OPENCODE_DIR="$HOME/.opencode/bin"
-          if [ ! -f "$OPENCODE_DIR/opencode" ]; then
-            echo "Installing opencode..."
-            curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
-          else
-            echo "opencode already cached"
+          OPENCODE_VERSION="1.17.9"
+          if [ -f "$OPENCODE_DIR/opencode" ]; then
+            CURRENT=$("$OPENCODE_DIR/opencode" --version 2>/dev/null || echo "")
+            if [ "$CURRENT" = "$OPENCODE_VERSION" ]; then
+              echo "opencode $OPENCODE_VERSION already cached"
+              echo "$OPENCODE_DIR" >> $GITHUB_PATH
+              exit 0
+            fi
           fi
+          echo "Installing opencode v$OPENCODE_VERSION..."
+          curl -fsSL https://opencode.ai/install | bash -s -- \
+            --version "$OPENCODE_VERSION" --no-modify-path
           echo "$OPENCODE_DIR" >> $GITHUB_PATH
 
       - name: Debug opencode
