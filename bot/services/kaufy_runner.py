@@ -47,9 +47,22 @@ class KaufyRunner:
         """Return isolated HOME directory for this specific user."""
         user_home = f"{OPCODE_HOME_BASE}/user_{self.user_id}"
         Path(user_home).mkdir(parents=True, exist_ok=True)
-        # Ensure the agent directory exists
-        agent_dir = Path(user_home) / ".config" / "opencode" / "agents"
-        agent_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure the agent & config directories exist
+        config_dir = Path(user_home) / ".config" / "opencode"
+        (config_dir / "agents").mkdir(parents=True, exist_ok=True)
+        # Create/open opencode.json with model as a STRING (never object form).
+        # Without this, newer opencode versions (≥1.17.18) may internally convert
+        # a CLI --model value to {modelID, providerID} and fail Zod validation.
+        config_file = config_dir / "opencode.json"
+        if config_file.exists():
+            try:
+                cfg = json.loads(config_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                cfg = {}
+        else:
+            cfg = {}
+        cfg["model"] = "opencode/big-pickle"  # force string format
+        config_file.write_text(json.dumps(cfg, indent=2))
         return user_home
 
     @staticmethod
@@ -137,10 +150,13 @@ class KaufyRunner:
             # can't be answered headlessly. --dir keeps it inside this user's home.
             # Build options FIRST, then the positional prompt last, otherwise
             # opencode (yargs) ignores flags placed after plain arguments.
+            # NOTE: model is NOT passed via CLI to avoid a bug in newer opencode
+            # (≥1.17.18) that converts --model string to {modelID, providerID}
+            # object and then fails Zod validation.  Model is set via the agent
+            # file AND the opencode.json written by _user_home() above.
             cmd = ["opencode", "run"]
             if agent_path:
                 cmd += ["--agent", "kaufy"]
-            cmd += ["--model", "opencode/big-pickle"]
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
 
@@ -212,10 +228,13 @@ class KaufyRunner:
         user_context = await self._build_context(username=username)
         full_input = f"{user_context}\n\n---\n\n{prompt}"
 
-        cmd = ["opencode", "run", full_input]
+        # NOTE: model is NOT passed via CLI (see run() for why).
+        # Flags BEFORE the positional arg so yargs doesn't mis-parse.
+        cmd = ["opencode", "run"]
         if agent_path:
             cmd += ["--agent", "kaufy"]
         cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
+        cmd += [full_input]
 
         try:
             self.process = await asyncio.create_subprocess_exec(
