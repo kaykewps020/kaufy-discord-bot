@@ -126,18 +126,24 @@ class KaufyRunner:
                     pass
             before = set(output_dir.iterdir())
 
-            cmd = ["opencode", "run"]
-            if agent_path:
-                cmd.extend(["--agent", "kaufy"])
-
-            # Build input with user context
+            # Build input with user context.
             user_context = await self._build_context(username=username, is_owner=is_owner)
             full_input = f"{user_context}\n\n---\n\n{prompt}"
+
+            # `opencode run [message..]` takes the prompt as a POSITIONAL argument
+            # (NOT stdin). Without a message it drops into interactive mode → no
+            # TTY → exit code 1. --dangerously-skip-permissions is required so the
+            # agent's command/file writes don't block on a permission prompt that
+            # can't be answered headlessly. --dir keeps it inside this user's home.
+            cmd = ["opencode", "run", full_input]
+            if agent_path:
+                cmd += ["--agent", "kaufy"]
+            cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
 
             try:
                 self.process = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdin=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(user_home),
@@ -147,7 +153,7 @@ class KaufyRunner:
                 timeout = Config.AI_TIMEOUT if Config.AI_TIMEOUT and Config.AI_TIMEOUT > 0 else None
                 try:
                     stdout, stderr = await asyncio.wait_for(
-                        self.process.communicate(full_input.encode()),
+                        self.process.communicate(),
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
@@ -162,7 +168,7 @@ class KaufyRunner:
 
                 response = stdout.decode().strip()
                 if self.process.returncode != 0:
-                    error = stderr.decode().strip()[:500]
+                    error = stderr.decode().strip()[:1000]
                     logger.warning(f"Kaufy exit {self.process.returncode} user {self.user_id}: {error}")
                     if not response:
                         if "database is locked" in error.lower():
@@ -170,7 +176,11 @@ class KaufyRunner:
                         elif "Unexpected error" in error:
                             response = "⚠️ Process error. Retrying..."
                         else:
-                            response = f"⚠️ Kaufy error (code {self.process.returncode})"
+                            hint = error.splitlines()[-1] if error else ""
+                            response = (
+                                f"⚠️ Kaufy error (code {self.process.returncode}). "
+                                f"{hint[:300]}"
+                            )
 
                 # Capture any files the model produced this run
                 after = set(output_dir.iterdir())
@@ -194,27 +204,24 @@ class KaufyRunner:
         """Stream response from Kaufy chunk by chunk."""
         user_home = self._user_home()
         agent_path = await self.ensure_agent_file()
-        cmd = ["opencode", "run"]
-        if agent_path:
-            cmd.extend(["--agent", "kaufy"])
 
         user_context = await self._build_context(username=username)
         full_input = f"{user_context}\n\n---\n\n{prompt}"
 
+        cmd = ["opencode", "run", full_input]
+        if agent_path:
+            cmd += ["--agent", "kaufy"]
+        cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
+
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(user_home),
                 env=self._bot_env(user_home)
             )
-
-            # Write input and close stdin
-            self.process.stdin.write(full_input.encode())
-            await self.process.stdin.drain()
-            self.process.stdin.close()
 
             full_response = ""
             while True:
