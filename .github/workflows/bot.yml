@@ -65,12 +65,27 @@ jobs:
           OPENCODE_DIR="$HOME/.opencode/bin"
           if [ ! -f "$OPENCODE_DIR/opencode" ]; then
             echo "Installing opencode..."
-            # Use bash explicitly (install script requires bash for pipefail)
             curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
           else
             echo "opencode already cached"
-            echo "$OPENCODE_DIR" >> $GITHUB_PATH
           fi
+          echo "$OPENCODE_DIR" >> $GITHUB_PATH
+
+      - name: Debug opencode
+        shell: bash
+        run: |
+          export PATH="$HOME/.opencode/bin:$PATH"
+          echo "=== opencode version ==="
+          opencode --version 2>&1
+          echo ""
+          echo "=== Available models ==="
+          opencode models 2>&1
+          echo ""
+          echo "=== opencode config ==="
+          cat "$HOME/.config/opencode/opencode.json" 2>/dev/null || echo "no config file found"
+          echo ""
+          echo "=== OPENCODE_API_KEY set? ==="
+          [ -z "$OPENCODE_API_KEY" ] && echo "NOT SET" || echo "IS SET (masked)"
 
       - name: Install Python dependencies
         run: |
