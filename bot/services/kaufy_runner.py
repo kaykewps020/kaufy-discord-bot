@@ -135,14 +135,16 @@ class KaufyRunner:
             # TTY → exit code 1. --dangerously-skip-permissions is required so the
             # agent's command/file writes don't block on a permission prompt that
             # can't be answered headlessly. --dir keeps it inside this user's home.
-            cmd = ["opencode", "run", full_input]
+            # Build options FIRST, then the positional prompt last, otherwise
+            # opencode (yargs) ignores flags placed after plain arguments and
+            # falls back to its built-in default model (xai/grok-3-mini).
+            cmd = ["opencode", "run"]
             if agent_path:
                 cmd += ["--agent", "kaufy"]
-            # Let the agent's own frontmatter (model: opencode/big-pickle) decide
-            # the model. Do NOT force --model here: forcing it caused opencode to
-            # ignore the agent and fall back to its built-in default. Keep it
-            # minimal so the kaufy agent fully loads (no --pure interference).
+            # Force the model explicitly so the xai default never wins.
+            cmd += ["--model", Config.MODEL]
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
+            cmd += [full_input]
 
             try:
                 self.process = await asyncio.create_subprocess_exec(
