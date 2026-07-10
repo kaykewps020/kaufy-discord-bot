@@ -138,7 +138,11 @@ class KaufyRunner:
             cmd = ["opencode", "run", full_input]
             if agent_path:
                 cmd += ["--agent", "kaufy"]
-            cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
+            # Let the agent's own frontmatter (model: opencode/big-pickle) decide
+            # the model. Do NOT force --model here: forcing it caused opencode to
+            # ignore the agent and fall back to its built-in default. Keep it
+            # minimal so the kaufy agent fully loads (no --pure interference).
+            cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
 
             try:
                 self.process = await asyncio.create_subprocess_exec(
