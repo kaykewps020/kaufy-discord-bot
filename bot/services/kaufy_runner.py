@@ -152,16 +152,16 @@ class KaufyRunner:
             # can't be answered headlessly. --dir keeps it inside this user's home.
             # Build options FIRST, then the positional prompt last, otherwise
             # opencode (yargs) ignores flags placed after plain arguments.
-            # --model is passed on CLI AND set in opencode.jsonc (written by
-            # _user_home) — the CLI takes precedence.  opencode is pinned to
-            # v1.17.9 (via GitHub Actions workflow), which handles the string
-            # format correctly (no object conversion bug).
             cmd = ["opencode", "run"]
             if agent_path:
                 cmd += ["--agent", "kaufy"]
+                logger.info(f"Agent loaded from {agent_path}")
+            else:
+                logger.warning("No agent path — --agent kaufy NOT added!")
             cmd += ["--model", "opencode/big-pickle"]
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
+            logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
 
             try:
                 self.process = await asyncio.create_subprocess_exec(
@@ -191,8 +191,10 @@ class KaufyRunner:
 
                 response = stdout.decode().strip()
                 if self.process.returncode != 0:
-                    error = stderr.decode().strip()[:1000]
+                    full_stderr = stderr.decode().strip()
+                    error = full_stderr[:1000]
                     logger.warning(f"Kaufy exit {self.process.returncode} user {self.user_id}: {error}")
+                    logger.info(f"Full stderr (first 2000 chars): {full_stderr[:2000]}")
                     if not response:
                         if "database is locked" in error.lower():
                             response = "⚠️ Database busy, try again in a few seconds."
