@@ -59,12 +59,15 @@ def _save_logs(guild_id: int, data: dict[int, list[dict]]):
 # ──────────────────────────────────────────────
 
 def mod_or_owner():
-    """Check: user is moderator (Manage Messages) or owner."""
+    """Check: user is owner (ID-only) OR has Manage Messages permission.
+
+    NOTE: Owner ID check is ID-only (no via_secret). The owner secret is
+    only required for sensitive commands like .eval/.exec, not for basic
+    moderation like .purge, .ban, .kick, etc.
+    """
     async def predicate(ctx: commands.Context):
         if ctx.author.id in Config.OWNER_IDS:
-            auth = await owner_auth.is_owner(ctx.author.id, via_secret=True)
-            if auth:
-                return True
+            return True
         if ctx.author.guild_permissions.manage_messages:
             return True
         await ctx.reply("⛔ You need `Manage Messages` permission or owner.", delete_after=10)
