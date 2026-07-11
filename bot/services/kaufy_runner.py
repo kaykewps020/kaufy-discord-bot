@@ -66,10 +66,17 @@ class KaufyRunner:
 
     @staticmethod
     def _bot_env(user_home: str) -> dict:
-        """Return environment with isolated HOME so opencode doesn't touch user's config."""
+        """Return environment with isolated HOME so opencode doesn't touch user's config.
+
+        IMPORTANT: XDG_CONFIG_HOME MUST be FORCE-OVERRIDDEN (not setdefault).
+        If XDG_CONFIG_HOME already points to the real home (e.g. from the
+        CI debug step that ran opencode --version), setdefault won't override
+        it. Opencode then looks for agents in the real home's config directory
+        instead of the isolated one, and --agent kaufy fails.
+        """
         env = os.environ.copy()
         env["HOME"] = user_home
-        env.setdefault("XDG_CONFIG_HOME", user_home + "/.config")
+        env["XDG_CONFIG_HOME"] = user_home + "/.config"
         env["OPENCODE_AGENT_MODE"] = "true"
         return env
 
