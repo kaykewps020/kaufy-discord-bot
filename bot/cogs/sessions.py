@@ -166,9 +166,6 @@ class SessionCog(commands.Cog):
                              "dockerfile", "makefile", "env", "gitignore", "editorconfig"}
                 if ext in text_exts:
                     text = data.decode("utf-8", errors="replace")
-                    # Truncate very long files
-                    if len(text) > 50000:
-                        text = text[:50000] + "\n... [truncated]"
                     parts.append(
                         f"[File: {att.filename} ({len(data)} bytes)]\n```\n{text}\n```"
                     )

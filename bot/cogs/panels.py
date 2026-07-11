@@ -342,35 +342,46 @@ class WelcomeView(discord.ui.View):
         await channels["msg"].send(embed=embed)
 
         # ── config: Config panel ──
-        config_svg = svg_config_panel(
-            temperature=0.8,
-            max_tokens=4096,
-            plan=plan.upper()
-        )
-        config_file = discord.File(io.BytesIO(config_svg.encode()), filename="config.svg")
         await channels["config"].send(
-            content=f"{EMOJI_MANAGER} **Configuration Panel** — Adjust your AI experience below.",
-            file=config_file,
+            embed=discord.Embed(
+                title=f"{EMOJI_MANAGER} Configuration Panel",
+                description=(
+                    f"Adjust your AI experience below.\n\n"
+                    f"{EMOJI_BOTS} **Model:** {Config.MODEL}\n"
+                    f"{EMOJI_MANAGER} Use the dropdowns below to change settings."
+                ),
+                color=0x3498DB
+            ),
             view=ConfigView(member.id)
         )
 
         # ── thinking: Thinking panel (paid only) ──
         if is_paid and "thinking" in channels:
-            thinking_svg = svg_thinking_panel(plan)
-            thinking_file = discord.File(io.BytesIO(thinking_svg.encode()), filename="thinking.svg")
             await channels["thinking"].send(
-                content=f"{EMOJI_BOTS} **Thinking Mode** — AI reasoning is visible here.",
-                file=thinking_file,
+                embed=discord.Embed(
+                    title=f"{EMOJI_BOTS} Thinking Mode",
+                    description=(
+                        f"{EMOJI_BOOSTER} **Active** — AI reasoning is visible.\n\n"
+                        f"Ask a question in {channels['msg'].mention} and the AI's "
+                        f"thinking process will be displayed here."
+                    ),
+                    color=0x22C55E
+                ),
                 view=ThinkingView(member.id, plan)
             )
 
         # ── plans: Plans panel (free only) ──
         if not is_paid and "plans" in channels:
-            plans_svg = svg_plans_grid(plan)
-            plans_file = discord.File(io.BytesIO(plans_svg.encode()), filename="plans.svg")
             await channels["plans"].send(
-                content=f"{EMOJI_CART} **Plans & Subscription** — Crypto only.",
-                file=plans_file,
+                embed=discord.Embed(
+                    title=f"{EMOJI_CART} Plans & Subscription",
+                    description=(
+                        f"{EMOJI_SHOP} Choose your plan to unlock features.\n\n"
+                        f"{EMOJI_LTC} Crypto only: BTC / ETH / USDT / SOL\n"
+                        f"{EMOJI_BOOSTER} Click a plan below to see payment details."
+                    ),
+                    color=0x2ECC71
+                ),
                 view=PlansView(member.id)
             )
 
