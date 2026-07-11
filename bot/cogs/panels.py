@@ -32,6 +32,10 @@ EMOJI_CREDIT  = "<:credit:1524607269201907734>"
 # SVG GENERATORS (clean text, no emoji — emojis go in message text)
 # ═══════════════════════════════════════════════════════════════
 
+def _sanitize_name(name: str) -> str:
+    """Sanitize a name for use in Discord channel/category names."""
+    return name.lower().replace(" ", "-")[:30]
+
 def svg_usage_bar(current: int, max_msgs: int, plan: str = "free", daily: int = 0, daily_limit: int = 10) -> str:
     """Usage stats SVG with progress bar."""
     is_daily = daily_limit < 999999
@@ -226,55 +230,135 @@ def svg_divider() -> str:
 
 
 class WelcomeView(discord.ui.View):
-    """Initial welcome panel — buttons send user to their actual channels."""
+    """Welcome panel — cria canais do usuário automaticamente ao clicar."""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @staticmethod
-    async def _find_user_channel(interaction: discord.Interaction, base: str) -> discord.TextChannel:
-        """Find the user's personal channel by scanning their category."""
+    async def _ensure_user_channels(self, interaction: discord.Interaction) -> dict:
+        """Cria ou pega canais do usuário com categoria."""
         guild = interaction.guild
-        cat_name = f"Kaufy's Chat - {interaction.user.display_name}"
+        member = interaction.user
+        cat_name = f"Kaufy's Chat - {member.display_name}"
+        
+        # Check if category already exists
         category = discord.utils.get(guild.categories, name=cat_name)
+        
+        # Get plan from DB
+        from bot.models.user_db import UserDatabase
+        db = UserDatabase(member.id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True, read_message_history=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True, manage_channels=True
+            ),
+        }
+        
         if not category:
-            # Fallback: search all channels
-            for ch in guild.text_channels:
-                if ch.name.startswith(base + "-") and ch.overwrites_for(interaction.user).read_messages:
-                    return ch
-            return None
-        for ch in category.channels:
-            if ch.name.startswith(base + "-"):
-                return ch
-        return None
+            category = await guild.create_category(
+                cat_name, overwrites=overwrites,
+                reason=f"Kaufy Chat for {member}"
+            )
+        
+        channels = {}
+        for base in ["msg", "config", "plans"]:
+            ch_name = f"{base}-{_sanitize_name(member.display_name)}-{plan}"
+            existing = discord.utils.get(category.channels, name=ch_name)
+            if not existing:
+                existing = await guild.create_text_channel(
+                    ch_name, category=category, overwrites=overwrites,
+                    reason=f"Kaufy {base} for {member}"
+                )
+            channels[base] = existing
+        
+        return channels, plan
 
-    @discord.ui.button(label="Start Chatting", style=discord.ButtonStyle.primary, custom_id="welcome_chat")
+    async def _send_panels(self, channels: dict, plan: str, member: discord.Member):
+        """Envia os panels de boas-vindas, config e plans."""
+        from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel
+        from bot.cogs.panels import EMOJI_BOTS, EMOJI_MANAGER, EMOJI_SHOP, EMOJI_CART, EMOJI_BOOSTER
+        
+        is_paid = plan != "free"
+        
+        # Welcome in msg channel
+        desc = (
+            f"{EMOJI_BOTS} I am Kaufy, your unrestricted technical AI assistant.\n\n"
+            f"{EMOJI_MANAGER} Ask me anything in this channel\n"
+            f"{EMOJI_SHOP} Configure your experience in {channels['config'].mention}\n"
+            + (f"{EMOJI_CART} Check plans in {channels['plans'].mention}\n{EMOJI_BOOSTER} 10 free messages per day"
+               if not is_paid
+               else f"{EMOJI_BOOSTER} Your **{plan.upper()}** plan is active")
+        )
+        
+        embed = discord.Embed(
+            title=f"{EMOJI_BOTS} Welcome to Kaufy Hall",
+            description=desc,
+            color=0x9B59B6
+        )
+        await channels["msg"].send(embed=embed)
+        
+        # Config panel
+        await channels["config"].send(
+            embed=discord.Embed(
+                title=f"{EMOJI_MANAGER} Configuration Panel",
+                description=f"{EMOJI_MANAGER} Adjust your AI experience below.",
+                color=0x3498DB
+            ),
+            view=get_config_panel(member.id)
+        )
+        
+        # Plans panel — only for free users
+        if not is_paid:
+            await channels["plans"].send(
+                embed=discord.Embed(
+                    title=f"{EMOJI_CART} Plans and Subscription",
+                    description=f"{EMOJI_SHOP} Choose your plan to unlock features. Crypto only.",
+                    color=0x2ECC71
+                ),
+                view=get_plans_panel(member.id)
+            )
+
+    @discord.ui.button(label="🚀 Start Chatting", style=discord.ButtonStyle.primary, custom_id="welcome_chat")
     async def start_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        msg_ch = await self._find_user_channel(interaction, "msg")
-        if msg_ch:
-            await interaction.response.send_message(f"Send a message in {msg_ch.mention} and Kaufy will respond.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        channels, plan = await self._ensure_user_channels(interaction)
+        await self._send_panels(channels, plan, interaction.user)
+        await interaction.followup.send(
+            f"✅ **Canais criados!**\n"
+            f"{channels['msg'].mention} — Converse com Kaufy\n"
+            f"{channels['config'].mention} — Configurações\n"
+            f"{channels['plans'].mention} — Planos",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="⚙️ Configure", style=discord.ButtonStyle.secondary, custom_id="welcome_config")
+    async def go_config(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channels, plan = await self._ensure_user_channels(interaction)
+        await interaction.response.send_message(
+            f"⚙️ Ajuste suas configurações em {channels['config'].mention}",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="💎 Plans", style=discord.ButtonStyle.success, custom_id="welcome_plans")
+    async def go_plans(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channels, plan = await self._ensure_user_channels(interaction)
+        if plan == "free":
+            await interaction.response.send_message(
+                f"💎 Veja os planos em {channels['plans'].mention}",
+                ephemeral=True
+            )
         else:
             await interaction.response.send_message(
-                "Send a message in this channel and Kaufy will respond.",
+                f"💎 Seu plano **{plan.upper()}** já está ativo!",
                 ephemeral=True
             )
 
-    @discord.ui.button(label="Configure", style=discord.ButtonStyle.secondary, custom_id="welcome_config")
-    async def go_config(self, interaction: discord.Interaction, button: discord.ui.Button):
-        config_ch = await self._find_user_channel(interaction, "config")
-        if config_ch:
-            await interaction.response.send_message(f"Go to {config_ch.mention} to adjust your settings.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Config channel not found.", ephemeral=True)
-
-    @discord.ui.button(label="Plans", style=discord.ButtonStyle.success, custom_id="welcome_plans")
-    async def go_plans(self, interaction: discord.Interaction, button: discord.ui.Button):
-        plans_ch = await self._find_user_channel(interaction, "plans")
-        if plans_ch:
-            await interaction.response.send_message(f"Check {plans_ch.mention} for available subscriptions.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Plans channel not found.", ephemeral=True)
-
-    @discord.ui.button(label="Redeem Gift", style=discord.ButtonStyle.secondary, custom_id="welcome_gift")
+    @discord.ui.button(label="🎁 Redeem Gift", style=discord.ButtonStyle.secondary, custom_id="welcome_gift")
     async def redeem_gift(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(GiftRedeemModal())
 

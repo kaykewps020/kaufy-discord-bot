@@ -17,26 +17,21 @@ from bot.utils.helpers import format_uptime
 
 logger = logging.getLogger("kaufy.owner")
 
-def is_owner(*, via_secret: bool = True):
-    """Owner-access check used as a command guard.
+def is_owner(*, via_secret: bool = False):
+    """Owner-access check — by default, just requires owner ID.
 
-    via_secret=True (default & secure): caller must be a real owner ID *and*
-    have unlocked privileged mode by running .ownerauth <secret> this session.
-    This prevents anyone from impersonating the owner: even a genuine owner
-    ID must prove knowledge of OWNER_SECRET before privileged actions work.
-
-    via_secret=False: legacy ID-only check (used by non-sensitive paths).
+    via_secret=True: additionally requires .ownerauth <secret> (for sensitive
+    commands like .eval, .exec). Most commands don't need this — the owner ID
+    alone is sufficient.
     """
     from bot.services.owner_auth import owner_auth
 
     async def predicate(ctx: commands.Context):
         ok = await owner_auth.is_owner(ctx.author.id, via_secret=via_secret)
         if not ok and via_secret:
-            # Hint the owner to authenticate, without revealing the secret.
             try:
                 await ctx.reply(
-                    "🔒 Owner powers are locked. Run `.ownerauth <your_secret>` "
-                    "first to unlock this session.",
+                    "🔒 This command requires authentication. Run `.ownerauth <your_secret>` first.",
                     delete_after=15,
                 )
             except Exception:
@@ -442,9 +437,9 @@ class OwnerCog(commands.Cog):
     # ─── System Commands ──────────────────────────────────────
 
     @commands.command(name="eval")
-    @is_owner()
+    @is_owner(via_secret=True)
     async def eval_code(self, ctx: commands.Context, *, code: str):
-        """Evaluate Python code."""
+        """Evaluate Python code. Requires .ownerauth."""
         try:
             result = eval(code)
             await ctx.send(f"```py\n{result}\n```")
@@ -452,7 +447,7 @@ class OwnerCog(commands.Cog):
             await ctx.send(f"```py\nError: {e}\n```")
 
     @commands.command(name="exec")
-    @is_owner()
+    @is_owner(via_secret=True)
     async def exec_shell(self, ctx: commands.Context, *, cmd: str):
         """Execute a shell command."""
         try:
