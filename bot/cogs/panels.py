@@ -226,30 +226,51 @@ def svg_divider() -> str:
 
 
 class WelcomeView(discord.ui.View):
-    """Initial welcome panel with plain text buttons."""
+    """Initial welcome panel — buttons send user to their actual channels."""
     def __init__(self):
         super().__init__(timeout=None)
 
+    @staticmethod
+    async def _find_user_channel(interaction: discord.Interaction, base: str) -> discord.TextChannel:
+        """Find the user's personal channel by scanning their category."""
+        guild = interaction.guild
+        cat_name = f"Kaufy's Chat - {interaction.user.display_name}"
+        category = discord.utils.get(guild.categories, name=cat_name)
+        if not category:
+            # Fallback: search all channels
+            for ch in guild.text_channels:
+                if ch.name.startswith(base + "-") and ch.overwrites_for(interaction.user).read_messages:
+                    return ch
+            return None
+        for ch in category.channels:
+            if ch.name.startswith(base + "-"):
+                return ch
+        return None
+
     @discord.ui.button(label="Start Chatting", style=discord.ButtonStyle.primary, custom_id="welcome_chat")
     async def start_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Send a message in this channel and Kaufy will respond.",
-            ephemeral=True
-        )
+        msg_ch = await self._find_user_channel(interaction, "msg")
+        if msg_ch:
+            await interaction.response.send_message(f"Send a message in {msg_ch.mention} and Kaufy will respond.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Send a message in this channel and Kaufy will respond.",
+                ephemeral=True
+            )
 
     @discord.ui.button(label="Configure", style=discord.ButtonStyle.secondary, custom_id="welcome_config")
     async def go_config(self, interaction: discord.Interaction, button: discord.ui.Button):
-        config_ch = discord.utils.get(interaction.guild.text_channels, name=f"config")
+        config_ch = await self._find_user_channel(interaction, "config")
         if config_ch:
-            await interaction.response.send_message(f"Go to #config to adjust your settings.", ephemeral=True)
+            await interaction.response.send_message(f"Go to {config_ch.mention} to adjust your settings.", ephemeral=True)
         else:
             await interaction.response.send_message("Config channel not found.", ephemeral=True)
 
     @discord.ui.button(label="Plans", style=discord.ButtonStyle.success, custom_id="welcome_plans")
     async def go_plans(self, interaction: discord.Interaction, button: discord.ui.Button):
-        plans_ch = discord.utils.get(interaction.guild.text_channels, name=f"plans")
+        plans_ch = await self._find_user_channel(interaction, "plans")
         if plans_ch:
-            await interaction.response.send_message(f"Check #plans for available subscriptions.", ephemeral=True)
+            await interaction.response.send_message(f"Check {plans_ch.mention} for available subscriptions.", ephemeral=True)
         else:
             await interaction.response.send_message("Plans channel not found.", ephemeral=True)
 
@@ -667,8 +688,10 @@ class ThinkingView(discord.ui.View):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("Not your panel.", ephemeral=True)
         if self.plan == "free":
+            plans_ch = discord.utils.get(interaction.guild.text_channels, name="plans")
+            plans_mention = plans_ch.mention if plans_ch else "#plans"
             return await interaction.response.send_message(
-                "Thinking mode is only available on paid plans. Check #plans to upgrade.",
+                f"Thinking mode is only available on paid plans. Check {plans_mention} to upgrade.",
                 ephemeral=True
             )
         await interaction.response.send_message(

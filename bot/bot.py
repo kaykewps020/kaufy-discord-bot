@@ -40,6 +40,8 @@ class KaufyBot(commands.Bot):
             "bot.cogs.sessions",
             "bot.cogs.channels",
             "bot.cogs.roles",
+            "bot.cogs.moderation",
+            "bot.cogs.verify",
         ]
         for cog in cogs:
             try:

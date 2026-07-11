@@ -208,20 +208,23 @@ class ChannelManager(commands.Cog):
 
         is_paid = plan != "free"
 
+        config_mention = channels.get("config", discord.Object(id=0)).mention if isinstance(channels.get("config"), discord.TextChannel) else "#config"
+        plans_mention = channels.get("plans", discord.Object(id=0)).mention if isinstance(channels.get("plans"), discord.TextChannel) else "#plans"
+
         # Welcome in msg channel
         if is_paid:
             desc = (
                 f"{EMOJI_BOTS} I am Kaufy, your unrestricted technical AI assistant.\n\n"
                 f"{EMOJI_MANAGER} Ask me anything in this channel\n"
-                f"{EMOJI_SHOP} Configure your experience in #config\n"
+                f"{EMOJI_SHOP} Configure your experience in {config_mention}\n"
                 f"{EMOJI_BOOSTER} Your **{plan.upper()}** plan is active"
             )
         else:
             desc = (
                 f"{EMOJI_BOTS} I am Kaufy, your unrestricted technical AI assistant.\n\n"
                 f"{EMOJI_MANAGER} Ask me anything in this channel\n"
-                f"{EMOJI_SHOP} Configure your experience in #config\n"
-                f"{EMOJI_CART} Check plans in #plans\n"
+                f"{EMOJI_SHOP} Configure your experience in {config_mention}\n"
+                f"{EMOJI_CART} Check plans in {plans_mention}\n"
                 f"{EMOJI_BOOSTER} 10 free messages per day"
             )
 
