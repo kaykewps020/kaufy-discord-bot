@@ -107,26 +107,50 @@ class SessionCog(commands.Cog):
                 if effective_daily_limit < 999999:
                     await db.increment_daily_count()
 
-                # Run Kaufy (concurrent semaphore for RAM management)
-                async with self._ai_semaphore:
-                    runner = KaufyRunner(author.id, db)
-                    # Owner check: identity is Discord-verified (no via_secret).
-                    # Owner secret is only needed for sensitive owner commands
-                    # (.eval, .exec), not for basic owner recognition in chat.
-                    from bot.services.owner_auth import owner_auth
-                    is_owner = await owner_auth.is_owner(author.id, via_secret=False)
+                # Owner check: identity is Discord-verified (no via_secret).
+                from bot.services.owner_auth import owner_auth
+                is_owner = await owner_auth.is_owner(author.id, via_secret=False)
 
+                # Priority queue: paid users skip the semaphore
+                priority = is_owner or plan_config.get("priority_queue", False)
+
+                # Run Kaufy (skip semaphore for priority users)
+                if priority:
+                    runner = KaufyRunner(author.id, db)
                     response, files = await runner.run(
                         prompt or message.content,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         username=str(author),
                         is_owner=is_owner,
+                        plan=plan,
+                        context_messages=plan_config.get("context_messages", 10),
                     )
-                    # Force cleanup after response
                     await runner.stop()
+                else:
+                    async with self._ai_semaphore:
+                        runner = KaufyRunner(author.id, db)
+                        response, files = await runner.run(
+                            prompt or message.content,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            username=str(author),
+                            is_owner=is_owner,
+                            plan=plan,
+                            context_messages=plan_config.get("context_messages", 10),
+                        )
+                        await runner.stop()
 
-                # Send response (+ any files the model produced)
+                # ── Parse <thinking> tags from response ──
+                thinking_content = ""
+                clean_response = response
+                import re
+                thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', response, re.DOTALL))
+                if thinking_matches:
+                    thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
+                    clean_response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
+
+                # Send response (+ any files the model produced) — WITHOUT thinking tags
                 from pathlib import Path as _Path
                 file_objs = []
                 for fpath in files or []:
@@ -136,11 +160,10 @@ class SessionCog(commands.Cog):
                             file_objs.append(discord.File(str(p)))
                         except Exception as e:
                             logger.error(f"Failed to attach file {fpath}: {e}")
-                await self._send_response(channel, response, message, files=file_objs if file_objs else None)
+                await self._send_response(channel, clean_response, message, files=file_objs if file_objs else None)
 
-                # ── Route response to thinking channel (paid users only) ──
-                if is_owner or plan != "free":
-                    # Find the user's thinking channel in the same category
+                # ── Route thinking content to #thinking channel (paid/owner only) ──
+                if (is_owner or plan != "free") and thinking_content:
                     if message.channel.category:
                         thinking_ch = discord.utils.get(
                             message.channel.category.channels,
@@ -149,8 +172,7 @@ class SessionCog(commands.Cog):
                         if thinking_ch:
                             try:
                                 await thinking_ch.send(
-                                    f"**{author}** said:\n{message.content[:500]}{'...' if len(message.content) > 500 else ''}\n\n"
-                                    f"**Kaufy:**\n{response[:1500]}{'...' if len(response) > 1500 else ''}"
+                                    f"**💭 {author}'s thinking:**\n{thinking_content[:1900]}"
                                 )
                             except Exception as e:
                                 logger.error(f"Failed to send thinking channel: {e}")
@@ -266,6 +288,98 @@ class SessionCog(commands.Cog):
                 await conn.execute("DELETE FROM messages WHERE role IN ('user', 'assistant')")
                 await conn.commit()
         await ctx.send("Conversation context cleared.")
+
+    @commands.command(name="search")
+    async def web_search(self, ctx: commands.Context, *, query: str):
+        """Search the web — paid users only. Uses web search results as context for Kaufy."""
+        ch_base = _channel_base(ctx.channel.name)
+        if ch_base != Config.CHANNEL_MSG:
+            return
+        db = UserDatabase(ctx.author.id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
+        if not plan_config.get("web_search", False):
+            await ctx.send("Web search is only available on paid plans (7d, 14d, 30d, lifetime).")
+            return
+
+        await ctx.send(f"🔍 Searching for: {query}")
+        try:
+            import aiohttp
+            from urllib.parse import quote
+            encoded = quote(query)
+            url = f"https://html.duckduckgo.com/html/?q={encoded}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=15) as resp:
+                    html = await resp.text()
+            # Simple extraction: get text snippets
+            import re
+            snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+            results = []
+            for s in snippets[:5]:
+                clean = re.sub(r'<[^>]+>', '', s).strip()
+                if clean:
+                    results.append(clean)
+            web_context = "Web search results for: " + query + "\n" + "\n".join(f"- {r}" for r in results) if results else "No results found."
+        except Exception as e:
+            web_context = f"[Web search failed: {e}]"
+
+        # Now process the query with web context
+        from bot.services.owner_auth import owner_auth
+        is_owner = await owner_auth.is_owner(ctx.author.id, via_secret=False)
+        runner = KaufyRunner(ctx.author.id, db)
+        response, files = await runner.run(
+            f"Based on web search results, answer: {query}",
+            temperature=0.8,
+            max_tokens=plan_config.get("max_tokens_allowed", 4096),
+            username=str(ctx.author),
+            is_owner=is_owner,
+            plan=plan,
+            context_messages=plan_config.get("context_messages", 10),
+            web_context=web_context,
+        )
+        await runner.stop()
+
+        # Parse thinking tags
+        thinking_content = ""
+        clean_response = response
+        import re
+        thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', response, re.DOTALL))
+        if thinking_matches:
+            thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
+            clean_response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
+
+        # Route thinking
+        if (is_owner or plan != "free") and thinking_content and ctx.channel.category:
+            thinking_ch = discord.utils.get(
+                ctx.channel.category.channels, name__startswith="thinking-"
+            )
+            if thinking_ch:
+                try:
+                    await thinking_ch.send(f"**💭 {ctx.author}'s thinking (search):**\n{thinking_content[:1900]}")
+                except:
+                    pass
+
+        await self._send_response(ctx.channel, clean_response, ctx.message)
+
+    @commands.command(name="planinfo")
+    async def plan_info(self, ctx: commands.Context):
+        """Show your current plan and its benefits."""
+        db = UserDatabase(ctx.author.id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        pc = Config.PLANS.get(plan, Config.PLANS["free"])
+        embed = discord.Embed(
+            title=f"📊 Your Plan: {plan.upper()}",
+            color=0x9B59B6,
+        )
+        embed.add_field(name="Daily Messages", value="Unlimited" if pc.get("daily_messages", 0) >= 999999 else f"{pc['daily_messages']}/day")
+        embed.add_field(name="Context Memory", value=f"{pc.get('context_messages', 10)} messages")
+        embed.add_field(name="Max Tokens", value=f"{pc.get('max_tokens_allowed', 4096)}")
+        embed.add_field(name="Thinking Mode", value="✅" if pc.get("thinking") else "❌")
+        embed.add_field(name="Web Search", value="✅" if pc.get("web_search") else "❌")
+        embed.add_field(name="Priority Queue", value="✅" if pc.get("priority_queue") else "❌")
+        await ctx.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

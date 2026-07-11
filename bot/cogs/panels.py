@@ -339,6 +339,35 @@ class WelcomeView(discord.ui.View):
             description="\n".join(desc_lines),
             color=0x9B59B6
         )
+        # Add plan benefits field
+        if is_paid:
+            ctx_msgs = Config.PLANS.get(plan, {}).get("context_messages", 50)
+            max_tok = Config.PLANS.get(plan, {}).get("max_tokens_allowed", 8192)
+            embed.add_field(
+                name=f"{EMOJI_BOOSTER} Your Benefits ({plan.upper()})",
+                value=(
+                    f"🧠 **{ctx_msgs} msg** context memory\n"
+                    f"📝 **{max_tok} tokens** max response\n"
+                    f"💭 Thinking mode: ✅\n"
+                    f"🌐 Web search: ✅\n"
+                    f"⚡ Priority queue: ✅\n"
+                    f"🚫 No daily limits"
+                ),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name=f"{EMOJI_CART} Free Plan",
+                value=(
+                    f"📝 10 msgs/day\n"
+                    f"🧠 10 msg context\n"
+                    f"💭 Thinking: ❌\n"
+                    f"🌐 Web search: ❌\n"
+                    f"⚡ Standard queue\n"
+                    f"💎 Upgrade for unlimited!"
+                ),
+                inline=False
+            )
         await channels["msg"].send(embed=embed)
 
         # ── config: Config panel ──
@@ -357,13 +386,18 @@ class WelcomeView(discord.ui.View):
 
         # ── thinking: Thinking panel (paid only) ──
         if is_paid and "thinking" in channels:
+            ctx_msgs = Config.PLANS.get(plan, {}).get("context_messages", 50)
             await channels["thinking"].send(
                 embed=discord.Embed(
-                    title=f"{EMOJI_BOTS} Thinking Mode",
+                    title=f"{EMOJI_BOTS} Thinking Mode — Active",
                     description=(
-                        f"{EMOJI_BOOSTER} **Active** — AI reasoning is visible.\n\n"
-                        f"Ask a question in {channels['msg'].mention} and the AI's "
-                        f"thinking process will be displayed here."
+                        f"{EMOJI_BOOSTER} **Active** — Kaufy's chain-of-thought reasoning appears here.\n\n"
+                        f"When you ask a question in {channels['msg'].mention}, Kaufy will:\n"
+                        f"1️⃣ Think through the problem (shown here)\n"
+                        f"2️⃣ Deliver the final answer in {channels['msg'].mention}\n\n"
+                        f"🧠 Context: last **{ctx_msgs} messages** remembered\n"
+                        f"🌐 Web search available via `.search <query>`\n"
+                        f"⚡ Priority processing enabled"
                     ),
                     color=0x22C55E
                 ),
@@ -377,6 +411,17 @@ class WelcomeView(discord.ui.View):
                     title=f"{EMOJI_CART} Plans & Subscription",
                     description=(
                         f"{EMOJI_SHOP} Choose your plan to unlock features.\n\n"
+                        f"**Free:**\n"
+                        f"• 10 messages/day\n"
+                        f"• 10 msg context memory\n"
+                        f"• Basic queue\n\n"
+                        f"**Paid plans (7d/14d/30d/Lifetime):**\n"
+                        f"🚫 **Unlimited messages** — no daily cap\n"
+                        f"🧠 **50-100 msg memory** — remembers more context\n"
+                        f"📝 **8K-16K tokens** — longer responses\n"
+                        f"💭 **Thinking mode** — see Kaufy's reasoning\n"
+                        f"🌐 **Web search** — `.search <query>` command\n"
+                        f"⚡ **Priority queue** — skip the line\n\n"
                         f"{EMOJI_LTC} Crypto only: BTC / ETH / USDT / SOL\n"
                         f"{EMOJI_BOOSTER} Click a plan below to see payment details."
                     ),
