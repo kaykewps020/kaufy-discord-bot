@@ -159,7 +159,7 @@ class KaufyRunner:
             else:
                 logger.warning("No agent path — --agent kaufy NOT added!")
             cmd += ["--model", "opencode/big-pickle"]
-            cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
+            cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
             cmd += [full_input]
             logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
 
