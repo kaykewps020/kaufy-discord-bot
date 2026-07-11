@@ -207,22 +207,67 @@ class KaufyRunner:
 
                 raw_output = stdout.decode().strip()
 
-                # Strip opencode greeting/welcome message (everything before
-                # the first blank line or --- separator). Without --pure,
-                # opencode outputs a greeting like "Olá! Sou o opencode..."
-                # before the actual model response. We only want the model's
-                # response text.
+                # Strip opencode preamble from the output.
+                #
+                # Without --pure, opencode wraps the model response with its own
+                # system prompt + optional greeting. The output can include:
+                #   - "! agent 'kaufy' not found. Falling back to default agent"
+                #   - "> build · big-pickle" or "> kaufy · big-pickle"
+                #   - "I'm opencode, a CLI tool for software engineering tasks..."
+                #   - "Olá! Sou o opencode..."
+                #   - "How can I help you?" (when agent wasn't loaded)
+                #
+                # We strip all of these so ONLY the model's actual response remains.
                 response = raw_output
-                # Try splitting on \n---\n first (common opencode separator)
-                if "\n---\n" in response:
-                    response = response.split("\n---\n", 1)[1].strip()
-                # Then try splitting on \n\n (blank line separator)
-                elif "\n\n" in response:
-                    # Only strip if the first part looks like a greeting
-                    first_part = response.split("\n\n", 1)[0].strip().lower()
-                    greeting_keywords = ["olá", "hello", "hi ", "hey", "sou o", "opencode", "assistente"]
-                    if any(kw in first_part for kw in greeting_keywords):
-                        response = response.split("\n\n", 1)[1].strip()
+
+                # 1. Remove "! agent ... not found" lines
+                lines = response.split("\n")
+                lines = [l for l in lines if not l.startswith("! agent")]
+                response = "\n".join(lines).strip()
+
+                # 2. Remove "> agent · model" header line (e.g. "> kaufy · big-pickle")
+                lines = response.split("\n")
+                lines = [l for l in lines if not l.startswith("> ")]
+                response = "\n".join(lines).strip()
+
+                # 3. Strip any opencode system greeting.
+                #    If the output starts with common opencode intro text, remove it.
+                greeting_phrases = [
+                    "i'm opencode", "sou o opencode", "olá! sou o",
+                    "hello! i'm", "hi, i'm", "hey there",
+                    "opencode is a cli tool", "i am opencode",
+                    "how can i help you", "what can i help",
+                ]
+                response_lower = response.lower()
+                for phrase in greeting_phrases:
+                    if response_lower.startswith(phrase):
+                        # Try to find where the actual content starts
+                        # Look for the first sentence end followed by a new paragraph
+                        for sep in ["\n---\n", "\n\n", ". ", "! ", "? "]:
+                            idx = response.find(sep)
+                            if idx != -1 and idx < 200:
+                                rest = response[idx + len(sep):].strip()
+                                if rest and len(rest) > 10:
+                                    response = rest
+                                    break
+
+                # 4. If after stripping we still have a very short or generic response
+                #    that looks like opencode default, show a fallback error.
+                fallback_phrases = [
+                    "i'm opencode", "sou o opencode", "i am opencode",
+                    "how can i help you today?", "opencode, a cli tool",
+                ]
+                response_lower = response.lower()
+                if any(phrase in response_lower for phrase in fallback_phrases):
+                    logger.warning(f"Agent not loaded — response is opencode default. "
+                                   f"Full raw output: {raw_output[:500]}")
+                    # The agent wasn't loaded. Show error + the raw message for debugging.
+                    response = (
+                        "⚠️ **Kaufy agent failed to load on this run.**\n"
+                        "The response was the default opencode assistant instead of Kaufy.\n"
+                        "The owner has been notified. Try again in a moment.\n"
+                    )
+
                 if self.process.returncode != 0:
                     full_stderr = stderr.decode().strip()
                     error = full_stderr[:1000]
