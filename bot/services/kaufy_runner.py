@@ -97,15 +97,35 @@ class KaufyRunner:
             source = TERMUX_AGENT
 
         if source is None:
+            logger.error("No agent source file found (checked repo and termux paths)")
             return ""
 
         # Copy if missing or different
-        if not agent_file.exists() or source.resolve() != agent_file.resolve():
-            try:
+        try:
+            if not agent_file.exists() or source.resolve() != agent_file.resolve():
                 shutil.copy2(str(source), str(agent_file))
-            except Exception as e:
-                logger.error(f"Failed to copy agent file: {e}")
-                return ""
+                logger.info(f"Copied agent: {source} -> {agent_file}")
+            else:
+                logger.info(f"Agent already up to date: {agent_file}")
+        except Exception as e:
+            logger.error(f"Failed to copy agent file: {e}")
+            return ""
+
+        # Verify file exists and is readable
+        if not agent_file.exists():
+            logger.error(f"Agent file doesn't exist after copy: {agent_file}")
+            return ""
+        agent_size = agent_file.stat().st_size
+        logger.info(f"Agent file ready: {agent_file} ({agent_size} bytes)")
+
+        # ALSO copy to $user_home root for --agent ./kaufy.md fallback
+        try:
+            root_agent = Path(user_home) / "kaufy.md"
+            shutil.copy2(str(source), str(root_agent))
+            logger.info(f"Also copied agent to root: {root_agent}")
+        except Exception as e:
+            logger.warning(f"Failed to copy agent to root: {e}")
+
         return str(agent_file)
 
     async def run(
@@ -161,20 +181,32 @@ class KaufyRunner:
             # Build options FIRST, then the positional prompt last, otherwise
             # opencode (yargs) ignores flags placed after plain arguments.
             cmd = ["opencode", "run"]
+
+            # PRE-FLIGHT CHECK: verify agent file exists before running
+            if agent_path:
+                agent_file_path = Path(agent_path)
+                if agent_file_path.exists():
+                    agent_size = agent_file_path.stat().st_size
+                    logger.info(f"✓ Agent file EXISTS: {agent_path} ({agent_size} bytes)")
+                else:
+                    logger.error(f"✗ Agent file MISSING: {agent_path}")
+                    # Try to re-copy
+                    agent_path = await self.ensure_agent_file()
+                    if agent_path and Path(agent_path).exists():
+                        logger.info(f"Re-copied agent: {agent_path}")
+                    else:
+                        logger.error("Agent file STILL missing after re-copy")
+
             if agent_path:
                 cmd += ["--agent", "kaufy"]
-                logger.info(f"Agent loaded from {agent_path}")
+                logger.info(f"--agent kaufy added (path: {agent_path})")
             else:
-                logger.warning("No agent path — --agent kaufy NOT added!")
+                logger.warning("--agent kaufy NOT added — no agent path!")
 
             cmd += ["--model", "opencode/big-pickle"]
-            # --dir = user_home root (so --agent kaufy can find the agent file).
-            # Security hardening is done via ~370 lines of behavioral rules
-            # in the agent file (Boundary 1-11) that prohibit reading the
-            # agent file, sensitive files, and other users' data.
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
-            logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
+            logger.info(f"opencode cmd prepared")
 
             try:
                 self.process = await asyncio.create_subprocess_exec(
