@@ -297,8 +297,16 @@ class Verification(commands.Cog):
             now = asyncio.get_event_loop().time()
             # Codes expire after 5 min — handled per-code with asyncio.ensure_future
 
+    async def _verify_or_owner(ctx: commands.Context) -> bool:
+        """Allow if admin OR owner (no secret needed for verify)."""
+        if ctx.author.id in Config.OWNER_IDS:
+            return True
+        if ctx.author.guild_permissions.administrator:
+            return True
+        await ctx.reply("⛔ You need `Administrator` permission or be the owner.", delete_after=10)
+        return False
+
     @commands.group(name="verify", invoke_without_command=True)
-    @commands.has_permissions(administrator=True)
     async def verify_group(self, ctx: commands.Context):
         """Verification system management.
 
@@ -306,10 +314,11 @@ class Verification(commands.Cog):
           setup [#channel] [@role]  — Place verification panel in a channel
           config                    — Show current verification settings
         """
+        if not await self._verify_or_owner(ctx):
+            return
         await ctx.send_help(ctx.command)
 
     @verify_group.command(name="setup")
-    @commands.has_permissions(administrator=True)
     async def verify_setup(
         self,
         ctx: commands.Context,
@@ -324,6 +333,8 @@ class Verification(commands.Cog):
 
         Example: .verify setup #welcome @Verified
         """
+        if not await self._verify_or_owner(ctx):
+            return
         target = channel or ctx.channel
         guild_id = ctx.guild.id
 
@@ -369,9 +380,10 @@ class Verification(commands.Cog):
             pass
 
     @verify_group.command(name="config")
-    @commands.has_permissions(administrator=True)
     async def verify_config(self, ctx: commands.Context):
         """Show current verification settings."""
+        if not await self._verify_or_owner(ctx):
+            return
         guild_id = ctx.guild.id
         config = _load_config(guild_id)
 
@@ -387,9 +399,10 @@ class Verification(commands.Cog):
         await ctx.reply("\n".join(lines))
 
     @verify_group.command(name="enable")
-    @commands.has_permissions(administrator=True)
     async def verify_enable(self, ctx: commands.Context):
         """Enable verification."""
+        if not await self._verify_or_owner(ctx):
+            return
         guild_id = ctx.guild.id
         config = _load_config(guild_id)
         config["enabled"] = True
@@ -397,9 +410,10 @@ class Verification(commands.Cog):
         await ctx.reply("✅ Verification enabled.")
 
     @verify_group.command(name="disable")
-    @commands.has_permissions(administrator=True)
     async def verify_disable(self, ctx: commands.Context):
         """Disable verification."""
+        if not await self._verify_or_owner(ctx):
+            return
         guild_id = ctx.guild.id
         config = _load_config(guild_id)
         config["enabled"] = False
