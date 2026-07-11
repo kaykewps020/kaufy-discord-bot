@@ -275,23 +275,23 @@ class Moderation(commands.Cog):
 
     # ─── CLEAR ────────────────────────────────────────────────
 
-    @commands.command(name="clear")
+    @commands.command(name="purge")
     @mod_or_owner()
-    async def clear_messages(self, ctx: commands.Context, count: int = 10):
+    async def purge_messages(self, ctx: commands.Context, count: int = 10):
         """Bulk delete messages in this channel.
 
-        Usage: .clear [count=10]
+        Usage: .purge [count=10]
         Max: 100
         """
         count = min(count, 100)
         try:
             deleted = await ctx.channel.purge(limit=count + 1)  # +1 for the command itself
-            msg = await ctx.send(f"🗑️ Deleted {len(deleted) - 1} message(s).", delete_after=3)
-            logger.info(f"Clear {len(deleted)-1} msgs in {ctx.channel} by {ctx.author}")
+            await ctx.send(f"🗑️ Deleted {len(deleted) - 1} message(s).", delete_after=3)
+            logger.info(f"Purge {len(deleted)-1} msgs in {ctx.channel} by {ctx.author}")
         except discord.Forbidden:
             await ctx.reply("⛔ Bot lacks Manage Messages permission.", delete_after=10)
         except Exception as e:
-            await ctx.reply(f"❌ Clear failed: {e}", delete_after=10)
+            await ctx.reply(f"❌ Purge failed: {e}", delete_after=10)
 
     # ─── SLOWMODE ─────────────────────────────────────────────
 
