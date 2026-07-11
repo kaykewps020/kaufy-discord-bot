@@ -105,10 +105,11 @@ class SessionCog(commands.Cog):
                 # Run Kaufy (concurrent semaphore for RAM management)
                 async with self._ai_semaphore:
                     runner = KaufyRunner(author.id, db)
-                    # Owner check: identity is Discord-verified AND must have
-                    # authenticated with the owner secret this session.
+                    # Owner check: identity is Discord-verified (no via_secret).
+                    # Owner secret is only needed for sensitive owner commands
+                    # (.eval, .exec), not for basic owner recognition in chat.
                     from bot.services.owner_auth import owner_auth
-                    is_owner = await owner_auth.is_owner(author.id, via_secret=True)
+                    is_owner = await owner_auth.is_owner(author.id, via_secret=False)
 
                     response, files = await runner.run(
                         message.content,

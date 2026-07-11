@@ -319,7 +319,20 @@ class ChannelManager(commands.Cog):
                 logger.error(f"Base channel setup failed: {e}")
 
     async def _ensure_base_channels(self, guild: discord.Guild):
-        """Cria canais base #msg, #config, #plans se não existirem (sem emoji no nome pra lookup funcionar)."""
+        """Cria categoria 'Kaufy Hall' com canais base #msg, #config, #plans, #thinking dentro."""
+        CATEGORY_NAME = "Kaufy Hall"
+        category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+        if not category:
+            try:
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+                }
+                category = await guild.create_category(CATEGORY_NAME, overwrites=overwrites, reason="Kaufy base category")
+            except Exception as e:
+                logger.warning(f"Could not create category {CATEGORY_NAME}: {e}")
+                return
+
         base = {
             Config.CHANNEL_MSG: "Send messages to Kaufy here",
             Config.CHANNEL_CONFIG: "Configure your AI experience",
@@ -327,16 +340,23 @@ class ChannelManager(commands.Cog):
             Config.CHANNEL_THINKING: "AI reasoning process (paid plans)",
         }
         for name, topic in base.items():
-            existing = discord.utils.get(guild.text_channels, name=name)
+            existing = discord.utils.get(category.channels, name=name)
+            if not existing:
+                existing = discord.utils.get(guild.text_channels, name=name)
             if not existing:
                 try:
                     await guild.create_text_channel(
-                        name,
-                        topic=topic,
+                        name, category=category, topic=topic,
                         reason="Kaufy base channel"
                     )
                 except Exception as e:
                     logger.warning(f"Could not create #{name}: {e}")
+            elif existing.category != category:
+                # Move existing channel into the category
+                try:
+                    await existing.edit(category=category, reason="Move to Kaufy Hall category")
+                except Exception as e:
+                    logger.warning(f"Could not move #{name}: {e}")
 
     async def _ensure_owner_plan(self):
         """Garante que o owner tenha plano lifetime."""

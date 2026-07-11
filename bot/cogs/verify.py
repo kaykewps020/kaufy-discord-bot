@@ -297,7 +297,7 @@ class Verification(commands.Cog):
             now = asyncio.get_event_loop().time()
             # Codes expire after 5 min — handled per-code with asyncio.ensure_future
 
-    async def _verify_or_owner(ctx: commands.Context) -> bool:
+    async def _verify_or_owner(self, ctx: commands.Context) -> bool:
         """Allow if admin OR owner (no secret needed for verify)."""
         if ctx.author.id in Config.OWNER_IDS:
             return True
