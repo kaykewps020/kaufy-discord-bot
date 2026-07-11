@@ -72,87 +72,98 @@ def _generate_code(length: int = None) -> str:
 def _generate_captcha_image(code: str) -> io.BytesIO | None:
     """Generate purple CAPTCHA image with the given code.
 
+    Uses a simpler, more reliable approach: draw all chars directly
+    on the image instead of rotating individual character images.
     Returns BytesIO with PNG data, or None if PIL is not available.
     """
     if not HAS_PIL:
         return None
 
-    width = 280
-    height = 100
+    width = 380
+    height = 120
 
     img = Image.new('RGB', (width, height), (15, 15, 35))  # dark background
     draw = ImageDraw.Draw(img)
 
     # Try to load a monospace font, fallback to default
     _FONT_PATHS = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",      # Ubuntu/Debian
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",                  # Some Linux
-        "/system/fonts/DroidSansMono.ttf",                           # Android
-        "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSansMono.ttf",  # Termux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/system/fonts/DroidSansMono.ttf",
+        "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     ]
     font = None
     for fp in _FONT_PATHS:
         try:
-            font = ImageFont.truetype(fp, 42)
+            font = ImageFont.truetype(fp, 36)
             break
         except:
             continue
     if font is None:
         font = ImageFont.load_default()
 
-    # Draw random lines (noise)
-    for _ in range(6):
+    # Background noise: random lines
+    for _ in range(8):
         x1 = random.randint(0, width)
         y1 = random.randint(0, height)
         x2 = random.randint(0, width)
         y2 = random.randint(0, height)
         draw.line([(x1, y1), (x2, y2)], fill=(60, 20, 80), width=2)
 
-    # Draw random dots
-    for _ in range(100):
+    # Background noise: random dots
+    for _ in range(150):
         x = random.randint(0, width)
         y = random.randint(0, height)
         draw.point((x, y), fill=(40, 10, 60))
 
-    # Draw each character with slight offset and rotation variation
-    total_w = 0
-    char_imgs = []
-    for ch in code:
-        # Random purple shade for each char
-        r = random.randint(120, 200)
-        g = random.randint(40, 120)
-        b = random.randint(180, 255)
+    # Draw characters with individual offsets, NO rotation (avoids clipping)
+    total_chars = len(code)
+    # Calculate spacing so they fit evenly
+    char_spacing = width // (total_chars + 1)
+    start_x = char_spacing
+    y_center = height // 2
+
+    for i, ch in enumerate(code):
+        # Random purple shade
+        r = random.randint(140, 220)
+        g = random.randint(50, 130)
+        b = random.randint(190, 255)
         color = (r, g, b)
 
-        # Create temp image for this char
+        # Random vertical offset (-15 to +15 pixels)
+        y_offset = random.randint(-15, 15)
+
+        # Random small rotation using individual char image (safe bounding)
         try:
             bbox = draw.textbbox((0, 0), ch, font=font)
             cw = bbox[2] - bbox[0]
             ch_h = bbox[3] - bbox[1]
         except:
-            cw = 30
-            ch_h = 40
+            cw = 20
+            ch_h = 30
 
-        char_img = Image.new('RGBA', (cw + 10, ch_h + 10), (0, 0, 0, 0))
+        # Create small char image with plenty of padding
+        padding = 10
+        char_img = Image.new('RGBA', (cw + padding * 2, ch_h + padding * 2), (0, 0, 0, 0))
         char_draw = ImageDraw.Draw(char_img)
-        char_draw.text((5, 5), ch, fill=color + (255,), font=font)
+        char_draw.text((padding, padding), ch, fill=color + (255,), font=font)
 
-        # Rotate slightly
-        angle = random.randint(-25, 25)
+        # Subtle rotation (max 15 degrees) to avoid clipping
+        angle = random.randint(-15, 15)
         char_img = char_img.rotate(angle, expand=True, fillcolor=(0, 0, 0, 0))
 
-        char_imgs.append(char_img)
-        total_w += char_img.width + 5
+        # Position: center in the image
+        x = start_x + i * char_spacing - char_img.width // 2
+        y = y_center - char_img.height // 2 + y_offset
 
-    # Composite all chars onto main image
-    x_offset = (width - total_w) // 2
-    y_offset = (height - 50) // 2
-    for cimg in char_imgs:
-        img.paste(cimg, (x_offset, y_offset), cimg)
-        x_offset += cimg.width + 5
+        # Ensure within bounds
+        x = max(5, min(x, width - char_img.width - 5))
+        y = max(5, min(y, height - char_img.height - 5))
 
-    # Draw more noise lines on top
-    for _ in range(3):
+        img.paste(char_img, (x, y), char_img)
+
+    # Foreground noise: subtle lines
+    for _ in range(4):
         x1 = random.randint(0, width)
         y1 = random.randint(0, height)
         x2 = random.randint(0, width)
@@ -169,35 +180,118 @@ def _generate_captcha_image(code: str) -> io.BytesIO | None:
 # VERIFY VIEW (the button panel)
 # ──────────────────────────────────────────────
 
+def _generate_wrong_codes(correct: str, count: int = 4) -> list[str]:
+    """Generate wrong codes that look similar to the correct one."""
+    wrong = set()
+    chars = string.ascii_uppercase + string.digits
+    max_attempts = 50
+    while len(wrong) < count and max_attempts > 0:
+        max_attempts -= 1
+        # Copy correct code and mutate 1-2 chars
+        candidate = list(correct)
+        mutations = random.randint(1, min(2, len(candidate)))
+        for _ in range(mutations):
+            idx = random.randrange(len(candidate))
+            candidate[idx] = random.choice(chars)
+        c = "".join(candidate)
+        if c != correct:
+            wrong.add(c)
+    # Fill remaining with random codes
+    while len(wrong) < count:
+        c = _generate_code(len(correct))
+        if c != correct:
+            wrong.add(c)
+    return list(wrong)[:count]
+
+
+class VerifyChoiceView(discord.ui.View):
+    """Multiple choice buttons under the CAPTCHA image."""
+    def __init__(self, correct_code: str, options: list[str]):
+        super().__init__(timeout=300)
+        self.correct_code = correct_code
+        for opt in options:
+            self.add_item(VerifyChoiceButton(opt, correct_code))
+
+
+class VerifyChoiceButton(discord.ui.Button):
+    """Single choice button."""
+    def __init__(self, code: str, correct: str):
+        label = code
+        style = discord.ButtonStyle.secondary
+        super().__init__(label=label, style=style, custom_id=f"verify_opt_{code}")
+        self.code = code
+        self.correct = correct
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.code == self.correct:
+            # Verify succeeded
+            async with _PENDING_LOCK:
+                _pending.pop(self.correct, None)
+
+            guild_id = interaction.guild.id
+            config = _load_config(guild_id)
+            role_id = config.get("role_id")
+            verified = interaction.guild.get_role(role_id) if role_id else None
+
+            if verified:
+                try:
+                    await interaction.user.add_roles(verified, reason="Verified via CAPTCHA")
+                    await interaction.response.edit_message(
+                        content="✅ **Verified!** You now have access to the server.",
+                        view=None,
+                        attachments=[],  # Remove the image
+                    )
+                    logger.info(f"User {interaction.user.id} verified in guild {guild_id}")
+                except Exception as e:
+                    await interaction.response.edit_message(
+                        content=f"❌ Verification passed but couldn't assign role: {e}",
+                        view=None,
+                    )
+            else:
+                await interaction.response.edit_message(
+                    content="✅ **Verified!** (No verified role configured)",
+                    view=None,
+                )
+        else:
+            await interaction.response.send_message(
+                "❌ Wrong code. Click 'Resend Code' to try again.",
+                ephemeral=True
+            )
+
+
 class VerifyView(discord.ui.View):
-    """Verification panel with a single button."""
+    """Verification panel with Verify + Resend buttons."""
 
     def __init__(self):
         super().__init__(timeout=None)
+        # The panel shows Verify + Resend
+        # When Verify is clicked, we send ephemeral CAPTCHA with choice buttons
 
-    async def _send_verification(self, interaction: discord.Interaction, code: str):
-        """Send verification prompt — CAPTCHA image or fallback text."""
+    @discord.ui.button(label="🔓 Verify", style=discord.ButtonStyle.success, custom_id="verify_start")
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Send ephemeral CAPTCHA image + multiple choice buttons."""
+        code = _generate_code()
+
+        # Store code
         async with _PENDING_LOCK:
             _pending[code] = interaction.user.id
 
         buf = _generate_captcha_image(code)
-        modal = VerifyModal(code)
+        options = [code] + _generate_wrong_codes(code)
+        random.shuffle(options)
 
         if buf:
-            file = discord.File(buf, filename="captcha.png")
-            await interaction.response.send_modal(modal)
-            await interaction.followup.send(
-                "**🧩 Verification**\nType the characters from the image below:",
-                file=file,
+            await interaction.response.send_message(
+                "**🧩 Verification**\nSelect the code from the image below:",
+                file=discord.File(buf, filename="captcha.png"),
+                view=VerifyChoiceView(code, options),
                 ephemeral=True,
             )
         else:
-            # Fallback: show code as text (Pillow not installed)
-            await interaction.response.send_modal(modal)
-            await interaction.followup.send(
-                f"**🧩 Verification**\n"
-                f"```\n{code}\n```\n"
-                f"Type the code above exactly as shown.",
+            # Fallback: show code as text + options
+            await interaction.response.send_message(
+                f"**🧩 Verification**\nSelect the code below:\n```\n{code}\n```",
+                view=VerifyChoiceView(code, options),
                 ephemeral=True,
             )
 
@@ -208,78 +302,36 @@ class VerifyView(discord.ui.View):
                 _pending.pop(code, None)
         asyncio.ensure_future(_expire())
 
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="verify_start")
-    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Send ephemeral CAPTCHA image + code input modal."""
-        code = _generate_code()
-        await self._send_verification(interaction, code)
-
-    @discord.ui.button(label="Resend Code", style=discord.ButtonStyle.secondary, custom_id="verify_resend")
+    @discord.ui.button(label="🔄 Resend Code", style=discord.ButtonStyle.secondary, custom_id="verify_resend")
     async def resend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Resend a new CAPTCHA code."""
+        """Resend a new CAPTCHA with fresh choices."""
         code = _generate_code()
-        await self._send_verification(interaction, code)
-
-
-class VerifyModal(discord.ui.Modal):
-    """Modal for entering the CAPTCHA code."""
-
-    def __init__(self, expected_code: str):
-        super().__init__(title="Verification")
-        self.expected_code = expected_code
-
-        self.code_input = discord.ui.TextInput(
-            label="Enter the code from the image",
-            placeholder="e.g. A7K3P",
-            required=True,
-            min_length=4,
-            max_length=10,
-        )
-        self.add_item(self.code_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        entered = self.code_input.value.strip().upper()
-        expected = self.expected_code
-
         async with _PENDING_LOCK:
-            stored_user = _pending.get(expected)
-            if stored_user is None or stored_user != interaction.user.id:
-                return await interaction.response.send_message(
-                    "❌ Code expired or invalid. Click 'Resend Code' for a new one.",
-                    ephemeral=True
-                )
-            if entered != expected:
-                return await interaction.response.send_message(
-                    "❌ Wrong code. Check the image and try again, or click 'Resend Code'.",
-                    ephemeral=True
-                )
-            # Clean up
-            _pending.pop(expected, None)
+            _pending[code] = interaction.user.id
 
-        # Verify succeeded — assign role
-        guild_id = interaction.guild.id
-        config = _load_config(guild_id)
-        role_id = config.get("role_id")
-        verified = interaction.guild.get_role(role_id) if role_id else None
+        buf = _generate_captcha_image(code)
+        options = [code] + _generate_wrong_codes(code)
+        random.shuffle(options)
 
-        if verified:
-            try:
-                await interaction.user.add_roles(verified, reason="Verified via CAPTCHA")
-                await interaction.response.send_message(
-                    "✅ **Verified!** You now have access to the server.",
-                    ephemeral=True
-                )
-                logger.info(f"User {interaction.user.id} verified in guild {guild_id}")
-            except Exception as e:
-                await interaction.response.send_message(
-                    f"❌ Verification passed but couldn't assign role: {e}",
-                    ephemeral=True
-                )
+        if buf:
+            await interaction.response.send_message(
+                "**🧩 New Code**\nSelect the code from the image below:",
+                file=discord.File(buf, filename="captcha.png"),
+                view=VerifyChoiceView(code, options),
+                ephemeral=True,
+            )
         else:
             await interaction.response.send_message(
-                "✅ **Verified!** (No verified role configured — ask an admin to set `.verify config`)",
-                ephemeral=True
+                f"**🧩 New Code**\nSelect the code below:\n```\n{code}\n```",
+                view=VerifyChoiceView(code, options),
+                ephemeral=True,
             )
+
+        async def _expire():
+            await asyncio.sleep(300)
+            async with _PENDING_LOCK:
+                _pending.pop(code, None)
+        asyncio.ensure_future(_expire())
 
 
 # ──────────────────────────────────────────────
