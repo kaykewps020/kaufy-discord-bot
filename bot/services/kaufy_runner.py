@@ -47,12 +47,9 @@ class KaufyRunner:
         """Return isolated HOME directory for this specific user."""
         user_home = f"{OPCODE_HOME_BASE}/user_{self.user_id}"
         Path(user_home).mkdir(parents=True, exist_ok=True)
-        # Ensure config dir exists (NOT agents — agents are SHARED)
+        # Ensure the config directory exists (for opencode.jsonc)
         config_dir = Path(user_home) / ".config" / "opencode"
         config_dir.mkdir(parents=True, exist_ok=True)
-        # Ensure WORKDIR exists (isolated from agent file & other users)
-        workdir = Path(user_home) / "workdir"
-        workdir.mkdir(parents=True, exist_ok=True)
         # Write opencode.jsonc so opencode finds the model:
         for _dir in (config_dir, Path(user_home)):
             cfg_file = _dir / "opencode.jsonc"
@@ -135,8 +132,8 @@ class KaufyRunner:
             user_home = self._user_home()
             agent_path = await self.ensure_agent_file()
 
-            # Per-run output capture dir (inside workdir, NOT in home root)
-            output_dir = Path(user_home) / "workdir" / Config.OUTPUT_DIR
+            # Per-run output capture dir
+            output_dir = Path(user_home) / Config.OUTPUT_DIR
             output_dir.mkdir(parents=True, exist_ok=True)
             # Clear stale artifacts so we only capture THIS run's files
             for old in output_dir.glob("*"):
@@ -171,11 +168,11 @@ class KaufyRunner:
                 logger.warning("No agent path — --agent kaufy NOT added!")
 
             cmd += ["--model", "opencode/big-pickle"]
-            # Workdir = user_home/workdir — agent file is NOT inside workdir
-            # Agent lives in $OPCODE_HOME_BASE/_agents/kaufy.md (shared, outside workdir)
-            # Other users' data is in $OPCODE_HOME_BASE/user_OTHER_ID/ — inaccessible
-            workdir = str(Path(user_home) / "workdir")
-            cmd += ["--dir", workdir, "--dangerously-skip-permissions"]
+            # --dir = user_home root (so --agent kaufy can find the agent file).
+            # Security hardening is done via ~370 lines of behavioral rules
+            # in the agent file (Boundary 1-11) that prohibit reading the
+            # agent file, sensitive files, and other users' data.
+            cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
             logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
 
@@ -316,8 +313,7 @@ class KaufyRunner:
         if agent_path:
             cmd += ["--agent", "kaufy"]
         cmd += ["--model", "opencode/big-pickle"]
-        workdir = str(Path(user_home) / "workdir")
-        cmd += ["--dir", workdir, "--dangerously-skip-permissions"]
+        cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
         cmd += [full_input]
 
         try:
