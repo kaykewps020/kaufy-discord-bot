@@ -54,7 +54,10 @@ class KaufyRunner:
         #   1. XDG path  (.config/opencode/opencode.jsonc)
         #   2. CWD path  (opencode.jsonc in user_home — cosmiconfig searches here)
         # This ensures the model is always a plain string, never an object.
-        # Also sets default_agent to kaufy so --agent kaufy always resolves.
+        # NOTE: Do NOT set default_agent here — opencode tries to resolve it
+        # from its internal registry which may not have kaufy registered yet,
+        # causing "default agent kaufy not found" crash on startup.
+        # The --agent kaufy CLI flag handles this by searching the file directly.
         for _dir in (config_dir, Path(user_home)):
             cfg_file = _dir / "opencode.jsonc"
             if cfg_file.exists():
@@ -65,7 +68,6 @@ class KaufyRunner:
             else:
                 cfg = {}
             cfg["model"] = "opencode/big-pickle"
-            cfg["default_agent"] = "kaufy"
             cfg_file.write_text(json.dumps(cfg, indent=2))
         return user_home
 
@@ -164,10 +166,11 @@ class KaufyRunner:
             # opencode (yargs) ignores flags placed after plain arguments.
             cmd = ["opencode", "run"]
             if agent_path:
-                cmd += ["--agent", "kaufy"]
+                cmd += ["--agent", agent_path]
                 logger.info(f"Agent loaded from {agent_path}")
             else:
-                logger.warning("No agent path — --agent kaufy NOT added!")
+                logger.warning("No agent path — --agent NOT added!")
+
             cmd += ["--model", "opencode/big-pickle"]
             cmd += ["--pure"]
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
@@ -264,7 +267,7 @@ class KaufyRunner:
         # opencode pinned to v1.17.9 — --model string is safe (no conversion bug).
         cmd = ["opencode", "run"]
         if agent_path:
-            cmd += ["--agent", "kaufy"]
+            cmd += ["--agent", agent_path]
         cmd += ["--model", "opencode/big-pickle"]
         cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
         cmd += [full_input]
