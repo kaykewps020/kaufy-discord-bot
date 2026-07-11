@@ -54,6 +54,7 @@ class KaufyRunner:
         #   1. XDG path  (.config/opencode/opencode.jsonc)
         #   2. CWD path  (opencode.jsonc in user_home — cosmiconfig searches here)
         # This ensures the model is always a plain string, never an object.
+        # Also sets default_agent to kaufy so --agent kaufy always resolves.
         for _dir in (config_dir, Path(user_home)):
             cfg_file = _dir / "opencode.jsonc"
             if cfg_file.exists():
@@ -64,6 +65,7 @@ class KaufyRunner:
             else:
                 cfg = {}
             cfg["model"] = "opencode/big-pickle"
+            cfg["default_agent"] = "kaufy"
             cfg_file.write_text(json.dumps(cfg, indent=2))
         return user_home
 
@@ -167,6 +169,7 @@ class KaufyRunner:
             else:
                 logger.warning("No agent path — --agent kaufy NOT added!")
             cmd += ["--model", "opencode/big-pickle"]
+            cmd += ["--pure"]
             cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
             logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
