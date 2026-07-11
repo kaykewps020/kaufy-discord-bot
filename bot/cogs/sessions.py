@@ -138,6 +138,23 @@ class SessionCog(commands.Cog):
                             logger.error(f"Failed to attach file {fpath}: {e}")
                 await self._send_response(channel, response, message, files=file_objs if file_objs else None)
 
+                # ── Route response to thinking channel (paid users only) ──
+                if is_owner or plan != "free":
+                    # Find the user's thinking channel in the same category
+                    if message.channel.category:
+                        thinking_ch = discord.utils.get(
+                            message.channel.category.channels,
+                            name__startswith="thinking-"
+                        )
+                        if thinking_ch:
+                            try:
+                                await thinking_ch.send(
+                                    f"**{author}** said:\n{message.content[:500]}{'...' if len(message.content) > 500 else ''}\n\n"
+                                    f"**Kaufy:**\n{response[:1500]}{'...' if len(response) > 1500 else ''}"
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to send thinking channel: {e}")
+
                 # Replace loading reaction with checkmark
                 try:
                     await message.remove_reaction(EMOJI_LOADING, self.bot.user)

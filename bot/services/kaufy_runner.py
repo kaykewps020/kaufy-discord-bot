@@ -159,7 +159,7 @@ class KaufyRunner:
             else:
                 logger.warning("No agent path — --agent kaufy NOT added!")
             cmd += ["--model", "opencode/big-pickle"]
-            cmd += ["--dir", user_home, "--pure", "--dangerously-skip-permissions"]
+            cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
             cmd += [full_input]
             logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
 
@@ -189,7 +189,24 @@ class KaufyRunner:
                         [],
                     )
 
-                response = stdout.decode().strip()
+                raw_output = stdout.decode().strip()
+
+                # Strip opencode greeting/welcome message (everything before
+                # the first blank line or --- separator). Without --pure,
+                # opencode outputs a greeting like "Olá! Sou o opencode..."
+                # before the actual model response. We only want the model's
+                # response text.
+                response = raw_output
+                # Try splitting on \n---\n first (common opencode separator)
+                if "\n---\n" in response:
+                    response = response.split("\n---\n", 1)[1].strip()
+                # Then try splitting on \n\n (blank line separator)
+                elif "\n\n" in response:
+                    # Only strip if the first part looks like a greeting
+                    first_part = response.split("\n\n", 1)[0].strip().lower()
+                    greeting_keywords = ["olá", "hello", "hi ", "hey", "sou o", "opencode", "assistente"]
+                    if any(kw in first_part for kw in greeting_keywords):
+                        response = response.split("\n\n", 1)[1].strip()
                 if self.process.returncode != 0:
                     full_stderr = stderr.decode().strip()
                     error = full_stderr[:1000]
