@@ -46,8 +46,8 @@ class SessionCog(commands.Cog):
         """Process AI messages one at a time to save RAM."""
         while True:
             try:
-                msg, channel, author, db = await asyncio.wait_for(self._queue.get(), timeout=300)
-                await self._process_message(msg, channel, author, db)
+                msg, channel, author, db, prompt = await asyncio.wait_for(self._queue.get(), timeout=300)
+                await self._process_message(msg, channel, author, db, prompt)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -55,8 +55,13 @@ class SessionCog(commands.Cog):
             except Exception as e:
                 logger.error(f"Queue worker error: {e}")
 
-    async def _process_message(self, message, channel, author, db):
-        """Actually process a message (called from queue worker)."""
+    async def _process_message(self, message, channel, author, db, prompt=""):
+        """Actually process a message (called from queue worker).
+        
+        Args:
+            prompt: The full prompt including file attachments (if any).
+                    Falls back to message.content if empty.
+        """
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
         daily_limit = plan_config.get("daily_messages", 999999)
@@ -112,7 +117,7 @@ class SessionCog(commands.Cog):
                     is_owner = await owner_auth.is_owner(author.id, via_secret=False)
 
                     response, files = await runner.run(
-                        message.content,
+                        prompt or message.content,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         username=str(author),
@@ -144,6 +149,38 @@ class SessionCog(commands.Cog):
                 logger.error(f"Session error for {author.id}: {e}")
                 await channel.send(f"An error occurred: {str(e)[:200]}")
 
+    async def _process_attachments(self, message: discord.Message) -> str:
+        """Download attachments and return their content as context string."""
+        if not message.attachments:
+            return ""
+        parts = []
+        for att in message.attachments:
+            try:
+                # Download (max 8MB)
+                data = await att.read()
+                ext = att.filename.split(".")[-1].lower() if "." in att.filename else ""
+                text_exts = {"txt", "md", "py", "js", "ts", "json", "xml", "html", "css",
+                             "yaml", "yml", "toml", "ini", "cfg", "conf", "log", "csv",
+                             "sh", "bat", "ps1", "sql", "rb", "go", "rs", "java", "kt",
+                             "swift", "c", "cpp", "h", "hpp", "php", "pl", "lua", "r",
+                             "dockerfile", "makefile", "env", "gitignore", "editorconfig"}
+                if ext in text_exts:
+                    text = data.decode("utf-8", errors="replace")
+                    # Truncate very long files
+                    if len(text) > 50000:
+                        text = text[:50000] + "\n... [truncated]"
+                    parts.append(
+                        f"[File: {att.filename} ({len(data)} bytes)]\n```\n{text}\n```"
+                    )
+                else:
+                    parts.append(
+                        f"[File: {att.filename} ({len(data)} bytes, type: {ext or 'unknown'})]"
+                        f"\n[Binary file — content not displayed as text]"
+                    )
+            except Exception as e:
+                parts.append(f"[File: {att.filename} — failed to read: {e}]")
+        return "\n\n".join(parts)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Handle messages in #msg channel — queue for AI processing."""
@@ -167,6 +204,12 @@ class SessionCog(commands.Cog):
         if message.content.startswith("."):
             return
 
+        # Build prompt from message content + attachments
+        prompt = message.content
+        att_text = await self._process_attachments(message)
+        if att_text:
+            prompt = f"{prompt}\n\n{att_text}" if prompt else att_text
+
         # Get or create session
         session = await session_manager.get_or_create(
             message.author.id, message.channel.id
@@ -178,7 +221,7 @@ class SessionCog(commands.Cog):
         session.plan = plan
 
         # Enqueue for AI processing (saves RAM — only 1 at a time)
-        await self._queue.put((message, message.channel, message.author, db))
+        await self._queue.put((message, message.channel, message.author, db, prompt))
         await message.add_reaction(EMOJI_LOADING)  # custom loading emoji
 
     async def _send_response(self, channel: discord.TextChannel, response: str, original: discord.Message, files=None):

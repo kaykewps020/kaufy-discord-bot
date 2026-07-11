@@ -230,25 +230,37 @@ def svg_divider() -> str:
 
 
 class WelcomeView(discord.ui.View):
-    """Welcome panel — cria canais do usuário automaticamente ao clicar."""
+    """Welcome panel — cria canais do usuário com plan-awareness."""
+
+    IS_OWNER = staticmethod(lambda uid: uid in Config.OWNER_IDS)
+
     def __init__(self):
         super().__init__(timeout=None)
 
+    async def _get_user_plan(self, user_id: int) -> str:
+        """Get plan from DB; owner always gets 'lifetime'."""
+        if self.IS_OWNER(user_id):
+            return "lifetime"
+        from bot.models.user_db import UserDatabase
+        db = UserDatabase(user_id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        return plan
+
     async def _ensure_user_channels(self, interaction: discord.Interaction) -> dict:
-        """Cria ou pega canais do usuário com categoria."""
+        """Cria canais do usuário: msg, config, (+ thinking se pago), nunca plans se pago."""
         guild = interaction.guild
         member = interaction.user
         cat_name = f"Kaufy's Chat - {member.display_name}"
-        
+        is_owner = self.IS_OWNER(member.id)
+
+        # Owner / paid plan → everything unlocked
+        plan = await self._get_user_plan(member.id)
+        is_paid = is_owner or plan != "free"
+
         # Check if category already exists
         category = discord.utils.get(guild.categories, name=cat_name)
-        
-        # Get plan from DB
-        from bot.models.user_db import UserDatabase
-        db = UserDatabase(member.id)
-        await db.init()
-        plan = await db.get_config("plan") or "free"
-        
+
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             member: discord.PermissionOverwrite(
@@ -258,15 +270,17 @@ class WelcomeView(discord.ui.View):
                 read_messages=True, send_messages=True, manage_channels=True
             ),
         }
-        
+
         if not category:
             category = await guild.create_category(
                 cat_name, overwrites=overwrites,
                 reason=f"Kaufy Chat for {member}"
             )
-        
+
         channels = {}
-        for base in ["msg", "config", "plans"]:
+
+        # Always create msg + config
+        for base in ["msg", "config"]:
             ch_name = f"{base}-{_sanitize_name(member.display_name)}-{plan}"
             existing = discord.utils.get(category.channels, name=ch_name)
             if not existing:
@@ -275,52 +289,89 @@ class WelcomeView(discord.ui.View):
                     reason=f"Kaufy {base} for {member}"
                 )
             channels[base] = existing
-        
+
+        # Thinking channel (paid only)
+        if is_paid:
+            ch_name = f"thinking-{_sanitize_name(member.display_name)}-{plan}"
+            existing = discord.utils.get(category.channels, name=ch_name)
+            if not existing:
+                existing = await guild.create_text_channel(
+                    ch_name, category=category, overwrites=overwrites,
+                    reason=f"Kaufy thinking for {member}"
+                )
+            channels["thinking"] = existing
+
+        # Plans channel (free only)
+        if not is_paid:
+            ch_name = f"plans-{_sanitize_name(member.display_name)}-{plan}"
+            existing = discord.utils.get(category.channels, name=ch_name)
+            if not existing:
+                existing = await guild.create_text_channel(
+                    ch_name, category=category, overwrites=overwrites,
+                    reason=f"Kaufy plans for {member}"
+                )
+            channels["plans"] = existing
+
         return channels, plan
 
     async def _send_panels(self, channels: dict, plan: str, member: discord.Member):
-        """Envia os panels de boas-vindas, config e plans."""
-        from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel
-        from bot.cogs.panels import EMOJI_BOTS, EMOJI_MANAGER, EMOJI_SHOP, EMOJI_CART, EMOJI_BOOSTER
-        
-        is_paid = plan != "free"
-        
-        # Welcome in msg channel
-        desc = (
-            f"{EMOJI_BOTS} I am Kaufy, your unrestricted technical AI assistant.\n\n"
-            f"{EMOJI_MANAGER} Ask me anything in this channel\n"
-            f"{EMOJI_SHOP} Configure your experience in {channels['config'].mention}\n"
-            + (f"{EMOJI_CART} Check plans in {channels['plans'].mention}\n{EMOJI_BOOSTER} 10 free messages per day"
-               if not is_paid
-               else f"{EMOJI_BOOSTER} Your **{plan.upper()}** plan is active")
-        )
-        
+        """Envia os panels corretos em cada canal."""
+        from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel, get_thinking_panel
+        is_owner = self.IS_OWNER(member.id)
+        is_paid = is_owner or plan != "free"
+
+        # ── msg: Welcome embed ──
+        desc_lines = [
+            f"{EMOJI_BOTS} I am Kaufy, your unrestricted technical AI assistant.\n",
+            f"{EMOJI_MANAGER} Ask me anything in this channel",
+            f"{EMOJI_SHOP} Configure your experience in {channels['config'].mention}",
+        ]
+        if is_paid:
+            desc_lines.append(f"{EMOJI_BOOSTER} Your **{plan.upper()}** plan is active")
+            if "thinking" in channels:
+                desc_lines.append(f"{EMOJI_BOTS} Thinking mode active in {channels['thinking'].mention}")
+        else:
+            desc_lines.append(f"{EMOJI_CART} Check plans in {channels['plans'].mention}")
+            desc_lines.append(f"{EMOJI_BOOSTER} 10 free messages per day")
+
         embed = discord.Embed(
             title=f"{EMOJI_BOTS} Welcome to Kaufy Hall",
-            description=desc,
+            description="\n".join(desc_lines),
             color=0x9B59B6
         )
         await channels["msg"].send(embed=embed)
-        
-        # Config panel
-        await channels["config"].send(
-            embed=discord.Embed(
-                title=f"{EMOJI_MANAGER} Configuration Panel",
-                description=f"{EMOJI_MANAGER} Adjust your AI experience below.",
-                color=0x3498DB
-            ),
-            view=get_config_panel(member.id)
+
+        # ── config: Config panel ──
+        config_svg = svg_config_panel(
+            temperature=0.8,
+            max_tokens=4096,
+            plan=plan.upper()
         )
-        
-        # Plans panel — only for free users
-        if not is_paid:
+        config_file = discord.File(io.BytesIO(config_svg.encode()), filename="config.svg")
+        await channels["config"].send(
+            content=f"{EMOJI_MANAGER} **Configuration Panel** — Adjust your AI experience below.",
+            file=config_file,
+            view=ConfigView(member.id)
+        )
+
+        # ── thinking: Thinking panel (paid only) ──
+        if is_paid and "thinking" in channels:
+            thinking_svg = svg_thinking_panel(plan)
+            thinking_file = discord.File(io.BytesIO(thinking_svg.encode()), filename="thinking.svg")
+            await channels["thinking"].send(
+                content=f"{EMOJI_BOTS} **Thinking Mode** — AI reasoning is visible here.",
+                file=thinking_file,
+                view=ThinkingView(member.id, plan)
+            )
+
+        # ── plans: Plans panel (free only) ──
+        if not is_paid and "plans" in channels:
+            plans_svg = svg_plans_grid(plan)
+            plans_file = discord.File(io.BytesIO(plans_svg.encode()), filename="plans.svg")
             await channels["plans"].send(
-                embed=discord.Embed(
-                    title=f"{EMOJI_CART} Plans and Subscription",
-                    description=f"{EMOJI_SHOP} Choose your plan to unlock features. Crypto only.",
-                    color=0x2ECC71
-                ),
-                view=get_plans_panel(member.id)
+                content=f"{EMOJI_CART} **Plans & Subscription** — Crypto only.",
+                file=plans_file,
+                view=PlansView(member.id)
             )
 
     @discord.ui.button(label="🚀 Start Chatting", style=discord.ButtonStyle.primary, custom_id="welcome_chat")
@@ -328,13 +379,18 @@ class WelcomeView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         channels, plan = await self._ensure_user_channels(interaction)
         await self._send_panels(channels, plan, interaction.user)
-        await interaction.followup.send(
-            f"✅ **Canais criados!**\n"
-            f"{channels['msg'].mention} — Converse com Kaufy\n"
-            f"{channels['config'].mention} — Configurações\n"
-            f"{channels['plans'].mention} — Planos",
-            ephemeral=True
-        )
+
+        lines = [
+            f"✅ **Canais prontos!**",
+            f"{channels['msg'].mention} — Converse com Kaufy",
+            f"{channels['config'].mention} — Configurações",
+        ]
+        if "thinking" in channels:
+            lines.append(f"{channels['thinking'].mention} — Pensamento visível")
+        if "plans" in channels:
+            lines.append(f"{channels['plans'].mention} — Planos disponíveis")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @discord.ui.button(label="⚙️ Configure", style=discord.ButtonStyle.secondary, custom_id="welcome_config")
     async def go_config(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -346,20 +402,28 @@ class WelcomeView(discord.ui.View):
 
     @discord.ui.button(label="💎 Plans", style=discord.ButtonStyle.success, custom_id="welcome_plans")
     async def go_plans(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channels, plan = await self._ensure_user_channels(interaction)
+        plan = await self._get_user_plan(interaction.user.id)
         if plan == "free":
+            channels, _ = await self._ensure_user_channels(interaction)
             await interaction.response.send_message(
                 f"💎 Veja os planos em {channels['plans'].mention}",
                 ephemeral=True
             )
         else:
             await interaction.response.send_message(
-                f"💎 Seu plano **{plan.upper()}** já está ativo!",
+                f"💎 Seu plano **{plan.upper()}** já está ativo — sem restrições!",
                 ephemeral=True
             )
 
     @discord.ui.button(label="🎁 Redeem Gift", style=discord.ButtonStyle.secondary, custom_id="welcome_gift")
     async def redeem_gift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Owner / paid users don't need gifts
+        plan = await self._get_user_plan(interaction.user.id)
+        if plan != "free":
+            return await interaction.response.send_message(
+                "🎁 Você já tem um plano ativo, não precisa de gift!",
+                ephemeral=True
+            )
         await interaction.response.send_modal(GiftRedeemModal())
 
 

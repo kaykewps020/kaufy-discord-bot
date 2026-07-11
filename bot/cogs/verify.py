@@ -18,7 +18,17 @@ import io
 import asyncio
 import json
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+
+# Pillow (PIL) — required for CAPTCHA images
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
+except ImportError:
+    Image = ImageDraw = ImageFont = None
+    HAS_PIL = False
+    import warnings
+    warnings.warn("Pillow not installed — verify CAPTCHA will use text-based codes")
+
 from bot.config import Config
 
 logger = logging.getLogger("kaufy.verify")
@@ -59,11 +69,14 @@ def _generate_code(length: int = None) -> str:
     return ''.join(random.choice(chars) for _ in range(length))
 
 
-def _generate_captcha_image(code: str) -> io.BytesIO:
+def _generate_captcha_image(code: str) -> io.BytesIO | None:
     """Generate purple CAPTCHA image with the given code.
 
-    Returns BytesIO with PNG data.
+    Returns BytesIO with PNG data, or None if PIL is not available.
     """
+    if not HAS_PIL:
+        return None
+
     width = 280
     height = 100
 
@@ -71,13 +84,21 @@ def _generate_captcha_image(code: str) -> io.BytesIO:
     draw = ImageDraw.Draw(img)
 
     # Try to load a monospace font, fallback to default
-    try:
-        font = ImageFont.truetype("/system/fonts/DroidSansMono.ttf", 42)
-    except:
+    _FONT_PATHS = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",      # Ubuntu/Debian
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",                  # Some Linux
+        "/system/fonts/DroidSansMono.ttf",                           # Android
+        "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSansMono.ttf",  # Termux
+    ]
+    font = None
+    for fp in _FONT_PATHS:
         try:
-            font = ImageFont.truetype("/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSansMono.ttf", 42)
+            font = ImageFont.truetype(fp, 42)
+            break
         except:
-            font = ImageFont.load_default()
+            continue
+    if font is None:
+        font = ImageFont.load_default()
 
     # Draw random lines (noise)
     for _ in range(6):
@@ -154,29 +175,31 @@ class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="verify_start")
-    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Send ephemeral CAPTCHA image + code input modal."""
-        code = _generate_code()
-
-        # Store code with expiry (5 min)
+    async def _send_verification(self, interaction: discord.Interaction, code: str):
+        """Send verification prompt — CAPTCHA image or fallback text."""
         async with _PENDING_LOCK:
             _pending[code] = interaction.user.id
 
-        # Generate image
         buf = _generate_captcha_image(code)
-        file = discord.File(buf, filename="captcha.png")
-
-        # Create modal for code input
         modal = VerifyModal(code)
-        await interaction.response.send_modal(modal)
 
-        # Also send the image ephemerally
-        await interaction.followup.send(
-            "**🧩 Verification**\nType the characters from the image below:",
-            file=file,
-            ephemeral=True,
-        )
+        if buf:
+            file = discord.File(buf, filename="captcha.png")
+            await interaction.response.send_modal(modal)
+            await interaction.followup.send(
+                "**🧩 Verification**\nType the characters from the image below:",
+                file=file,
+                ephemeral=True,
+            )
+        else:
+            # Fallback: show code as text (Pillow not installed)
+            await interaction.response.send_modal(modal)
+            await interaction.followup.send(
+                f"**🧩 Verification**\n"
+                f"```\n{code}\n```\n"
+                f"Type the code above exactly as shown.",
+                ephemeral=True,
+            )
 
         # Auto-expire after 5 min
         async def _expire():
@@ -185,30 +208,17 @@ class VerifyView(discord.ui.View):
                 _pending.pop(code, None)
         asyncio.ensure_future(_expire())
 
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="verify_start")
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Send ephemeral CAPTCHA image + code input modal."""
+        code = _generate_code()
+        await self._send_verification(interaction, code)
+
     @discord.ui.button(label="Resend Code", style=discord.ButtonStyle.secondary, custom_id="verify_resend")
     async def resend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Resend a new CAPTCHA code."""
         code = _generate_code()
-        async with _PENDING_LOCK:
-            _pending[code] = interaction.user.id
-
-        buf = _generate_captcha_image(code)
-        file = discord.File(buf, filename="captcha.png")
-
-        modal = VerifyModal(code)
-        await interaction.response.send_modal(modal)
-
-        await interaction.followup.send(
-            "**🧩 New Code**\nType the characters from the image:",
-            file=file,
-            ephemeral=True,
-        )
-
-        async def _expire():
-            await asyncio.sleep(300)
-            async with _PENDING_LOCK:
-                _pending.pop(code, None)
-        asyncio.ensure_future(_expire())
+        await self._send_verification(interaction, code)
 
 
 class VerifyModal(discord.ui.Modal):

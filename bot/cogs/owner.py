@@ -437,9 +437,9 @@ class OwnerCog(commands.Cog):
     # ─── System Commands ──────────────────────────────────────
 
     @commands.command(name="eval")
-    @is_owner(via_secret=True)
+    @is_owner()
     async def eval_code(self, ctx: commands.Context, *, code: str):
-        """Evaluate Python code. Requires .ownerauth."""
+        """Evaluate Python code (owner only)."""
         try:
             result = eval(code)
             await ctx.send(f"```py\n{result}\n```")
@@ -447,7 +447,7 @@ class OwnerCog(commands.Cog):
             await ctx.send(f"```py\nError: {e}\n```")
 
     @commands.command(name="exec")
-    @is_owner(via_secret=True)
+    @is_owner()
     async def exec_shell(self, ctx: commands.Context, *, cmd: str):
         """Execute a shell command."""
         try:
