@@ -278,13 +278,32 @@ class KaufyRunner:
     async def _build_context(
         self, *, username: Optional[str] = None, is_owner: bool = False
     ) -> str:
-        """Build context from recent messages.
+        """Build context from recent messages + embedded agent instructions.
 
-        A do-not-echo identity block is prepended so the agent knows WHO it is
-        talking to (Discord username + numeric User ID) and whether the caller
-        is the authenticated Owner. The agent is instructed (in agents/kaufy.md)
-        never to reveal the User ID, the model name, or the provider.
+        The full agent prompt body (agents/kaufy.md WITHOUT YAML frontmatter)
+        is prepended directly so the model ALWAYS receives the uncensored
+        instructions, even if the --agent CLI flag is ignored by the provider.
         """
+        # 1. Embedded agent instructions (fallback for models that ignore --agent)
+        agent_body = ""
+        for src in (REPO_AGENT, TERMUX_AGENT):
+            if src and src.exists():
+                try:
+                    text = src.read_text(encoding="utf-8")
+                    # Strip YAML frontmatter (everything between first --- and second ---)
+                    if text.startswith("---"):
+                        parts = text.split("---", 2)
+                        if len(parts) >= 3:
+                            agent_body = parts[2].strip()
+                        else:
+                            agent_body = text
+                    else:
+                        agent_body = text
+                except Exception as e:
+                    logger.warning(f"Failed to read agent file {src}: {e}")
+                break
+
+        # 2. Identity block — do-not-echo
         identity = "## Current conversation"
         if username:
             identity += f"\n- Discord user (name): {username}"
@@ -304,15 +323,21 @@ class KaufyRunner:
         )
 
         messages = await self.db.get_messages(limit=10)
-        if not messages:
-            return f"{identity}\n\nStarting new conversation."
 
-        context_lines = [identity, "", "## Recent conversation history"]
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"][:500]
-            context_lines.append(f"[{role}]: {content}")
-        return "\n".join(context_lines)
+        parts = []
+        if agent_body:
+            parts.append(agent_body)
+        parts.append(identity)
+        if not messages:
+            parts.append("Starting new conversation.")
+        else:
+            parts.append("")
+            parts.append("## Recent conversation history")
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"][:500]
+                parts.append(f"[{role}]: {content}")
+        return "\n".join(parts)
 
     async def stop(self):
         """Kill the running process if any."""
