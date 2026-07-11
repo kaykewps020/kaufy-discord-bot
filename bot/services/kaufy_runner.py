@@ -47,17 +47,13 @@ class KaufyRunner:
         """Return isolated HOME directory for this specific user."""
         user_home = f"{OPCODE_HOME_BASE}/user_{self.user_id}"
         Path(user_home).mkdir(parents=True, exist_ok=True)
-        # Ensure the agent & config directories exist
+        # Ensure config dir exists (NOT agents — agents are SHARED)
         config_dir = Path(user_home) / ".config" / "opencode"
-        (config_dir / "agents").mkdir(parents=True, exist_ok=True)
-        # Write opencode.jsonc in TWO places so opencode finds the model:
-        #   1. XDG path  (.config/opencode/opencode.jsonc)
-        #   2. CWD path  (opencode.jsonc in user_home — cosmiconfig searches here)
-        # This ensures the model is always a plain string, never an object.
-        # NOTE: Do NOT set default_agent here — opencode tries to resolve it
-        # from its internal registry which may not have kaufy registered yet,
-        # causing "default agent kaufy not found" crash on startup.
-        # The --agent kaufy CLI flag handles this by searching the file directly.
+        config_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure WORKDIR exists (isolated from agent file & other users)
+        workdir = Path(user_home) / "workdir"
+        workdir.mkdir(parents=True, exist_ok=True)
+        # Write opencode.jsonc so opencode finds the model:
         for _dir in (config_dir, Path(user_home)):
             cfg_file = _dir / "opencode.jsonc"
             if cfg_file.exists():
@@ -83,11 +79,14 @@ class KaufyRunner:
     async def ensure_agent_file(self) -> str:
         """Ensure the Kaufy agent file exists in this user's isolated HOME.
 
+        The agent is stored in $HOME/.config/opencode/agents/ so `--agent kaufy`
+        can find it by name. This path is OUTSIDE the working directory
+        ($HOME/workdir/) so the model cannot read its own system prompt
+        by default. Behavioral rules in the agent enforce this boundary.
+
         Source priority:
           1. Bundled repo agent  (agents/kaufy.md) — canonical, works on GitHub
           2. Local Termux agent   (fallback for local dev/testing)
-        The prompt instructs the agent on Discord identity, file delivery and
-        never disclosing the model/provider.
         """
         user_home = self._user_home()
         agent_dir = Path(user_home) / ".config" / "opencode" / "agents"
@@ -136,8 +135,8 @@ class KaufyRunner:
             user_home = self._user_home()
             agent_path = await self.ensure_agent_file()
 
-            # Per-run output capture dir (inside this user's isolated HOME)
-            output_dir = Path(user_home) / Config.OUTPUT_DIR
+            # Per-run output capture dir (inside workdir, NOT in home root)
+            output_dir = Path(user_home) / "workdir" / Config.OUTPUT_DIR
             output_dir.mkdir(parents=True, exist_ok=True)
             # Clear stale artifacts so we only capture THIS run's files
             for old in output_dir.glob("*"):
@@ -172,12 +171,11 @@ class KaufyRunner:
                 logger.warning("No agent path — --agent kaufy NOT added!")
 
             cmd += ["--model", "opencode/big-pickle"]
-            # NOTE: Intentionally NOT using --pure here. Without --pure, opencode
-            # wraps the agent with its own system prompt which establishes
-            # legitimate context. The aggressive "NEVER REFUSE" language was
-            # triggering jailbreak detection. The agent file now uses subtle
-            # framing instead.
-            cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
+            # Workdir = user_home/workdir — agent file is NOT inside workdir
+            # Agent lives in $OPCODE_HOME_BASE/_agents/kaufy.md (shared, outside workdir)
+            # Other users' data is in $OPCODE_HOME_BASE/user_OTHER_ID/ — inaccessible
+            workdir = str(Path(user_home) / "workdir")
+            cmd += ["--dir", workdir, "--dangerously-skip-permissions"]
             cmd += [full_input]
             logger.info(f"opencode cmd: {' '.join(cmd[:6])} ...")
 
@@ -273,7 +271,8 @@ class KaufyRunner:
         if agent_path:
             cmd += ["--agent", "kaufy"]
         cmd += ["--model", "opencode/big-pickle"]
-        cmd += ["--dir", user_home, "--dangerously-skip-permissions"]
+        workdir = str(Path(user_home) / "workdir")
+        cmd += ["--dir", workdir, "--dangerously-skip-permissions"]
         cmd += [full_input]
 
         try:
