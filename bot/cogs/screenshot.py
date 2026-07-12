@@ -20,6 +20,7 @@ import os
 import io
 import asyncio
 import tempfile
+from typing import Optional
 from pathlib import Path
 from bot.config import Config
 from bot.models.user_db import UserDatabase
@@ -45,7 +46,7 @@ except ImportError:
 # Config watermark
 WATERMARK_TEXT = "kaufy.hall"
 WATERMARK_OPACITY = 0.20  # 20% opacity — semi-transparent
-INVITE_LINK = "https://discord.gg/kaufyhall"
+INVITE_LINK = "https://discord.gg/6SN3Fmdvht"
 
 SCREENSHOT_DIR = Path(__file__).resolve().parent.parent.parent / "screenshots"
 
@@ -82,9 +83,56 @@ class ScreenshotCog(commands.Cog):
         else:
             await ctx.send("Use este comando no seu canal #msg.")
 
+    async def _render_html_to_png(self, html_path: str) -> Optional[str]:
+        """Render a local HTML file to PNG using Playwright.
+        
+        Returns path to the PNG file, or None if rendering failed.
+        The PNG will have the server watermark added.
+        """
+        if not HAS_PLAYWRIGHT:
+            logger.warning("Playwright not available — can't render HTML to PNG")
+            return None
+
+        png_path = str(html_path).replace(".html", ".png").replace(".htm", ".png")
+        if png_path == html_path:
+            png_path = html_path + ".png"
+
+        try:
+            html_file = Path(html_path).resolve()
+            if not html_file.is_file():
+                logger.error(f"HTML file not found: {html_path}")
+                return None
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-setuid-sandbox"]
+                )
+                page = await browser.new_page(
+                    viewport={"width": 1280, "height": 720}
+                )
+                # Open local file
+                await page.goto(html_file.as_uri(), timeout=15000, wait_until="networkidle")
+                await asyncio.sleep(1)  # Let any CSS animations finish
+
+                await page.screenshot(path=png_path, full_page=True)
+                await browser.close()
+
+            # Add watermark
+            self._add_watermark(png_path)
+            logger.info(f"Rendered HTML to PNG: {png_path}")
+            return png_path
+
+        except Exception as e:
+            logger.error(f"HTML→PNG render failed: {e}")
+            return None
+
     @screenshot_group.command(name="gen")
     async def screenshot_gen(self, ctx: commands.Context, *, description: str):
         """Gerar screenshot/visual via AI baseado em descrição.
+        
+        Gera HTML via AI, renderiza pra PNG com Playwright (se disponível)
+        e envia a imagem com watermark do servidor.
         
         Exemplo: .screenshot gen uma interface de hack com matrix green
         """
@@ -102,14 +150,18 @@ class ScreenshotCog(commands.Cog):
 
         is_owner = ctx.author.id in Config.OWNER_IDS
 
+        # Use streaming for the AI generation
         runner = KaufyRunner(ctx.author.id, db)
-        response, files = await runner.run(
+        full_response = ""
+        all_files = []
+
+        async for event in runner.run_stream(
             prompt=(
                 f"Gere um screenshot/visual baseado nesta descrição: {description}\n\n"
-                f"IMPORTANTE: Crie UM ARQUIVO HTML ou SVG em ./output/ "
-                f"com o visual solicitado. O arquivo DEVE ser completo e auto-contido "
-                f"(sem dependências externas). Use CSS inline. O arquivo será "
-                f"automaticamente capturado e enviado ao usuário.\n\n"
+                f"IMPORTANTE: Crie UM ARQUIVO HTML em ./output/ "
+                f"com o visual solicitado. O arquivo DEVE ser HTML puro com CSS inline, "
+                f"completo e auto-contido (sem dependências externas). "
+                f"O arquivo .html será renderizado para PNG automaticamente.\n\n"
                 f"Depois de criar o arquivo, explique brevemente o que foi criado."
             ),
             temperature=0.9,
@@ -118,29 +170,61 @@ class ScreenshotCog(commands.Cog):
             is_owner=is_owner,
             plan=plan,
             context_messages=5,
-        )
+        ):
+            if event["type"] == "chunk":
+                full_response += event["text"]
+            elif event["type"] == "file":
+                all_files.append(event["path"])
+            elif event["type"] == "error":
+                await ctx.send(event["text"])
+                full_response = event["text"]
+
         await runner.stop()
 
-        # Send response + any generated files
-        clean_response = response
-        file_objs = []
-        for fpath in files or []:
-            p = Path(fpath)
-            if p.is_file():
-                try:
-                    file_objs.append(discord.File(str(p)))
-                except Exception as e:
-                    logger.error(f"Failed to attach file {fpath}: {e}")
+        if not all_files:
+            await ctx.send(
+                f"{full_response[:1900] if full_response else 'Nenhum arquivo foi gerado. Tente uma descrição diferente.'}"
+            )
+            return
 
-        if file_objs:
-            await ctx.send(
-                f"📸 **Visual gerado:**\n{clean_response[:1500] if clean_response else 'Arquivo gerado!'}",
-                files=file_objs
-            )
-        else:
-            await ctx.send(
-                f"{clean_response[:1900] if clean_response else 'Nenhum arquivo foi gerado. Tente uma descrição diferente.'}"
-            )
+        # Try to render HTML→PNG with Playwright
+        png_sent = False
+        for fpath in all_files:
+            p = Path(fpath)
+            if not p.is_file():
+                continue
+            ext = p.suffix.lower()
+
+            if ext in (".html", ".htm") and HAS_PLAYWRIGHT:
+                # Render to PNG
+                png_path = await self._render_html_to_png(str(p))
+                if png_path:
+                    file = discord.File(png_path, filename="screenshot.png")
+                    await ctx.send(
+                        f"📸 **Visual gerado:** \"{description}\"",
+                        file=file
+                    )
+                    png_sent = True
+                    # Clean up temp files
+                    try:
+                        Path(png_path).unlink()
+                    except:
+                        pass
+                    continue
+
+            # Fallback: send original file
+            try:
+                file = discord.File(str(p))
+                await ctx.send(
+                    f"📄 **Arquivo gerado:** `{p.name}`\n{full_response[:1000] if not png_sent else ''}",
+                    file=file
+                )
+                png_sent = True
+            except Exception as e:
+                logger.error(f"Failed to send file {fpath}: {e}")
+
+        if not png_sent:
+            await ctx.send(full_response[:1900] if full_response else "✅ Visual gerado!")
 
     @screenshot_group.command(name="info")
     async def screenshot_info(self, ctx: commands.Context):
@@ -281,6 +365,29 @@ class ScreenshotCog(commands.Cog):
 
         except Exception as e:
             await ctx.send(f"❌ Erro ao capturar screenshot: {str(e)[:200]}")
+
+    @commands.command(name="invite")
+    async def server_invite(self, ctx: commands.Context):
+        """Create a permanent invite link for this server."""
+        # Only allow in the main guild
+        if ctx.guild.id != Config.GUILD_ID:
+            return await ctx.send("This command only works in Kaufy's Hall.")
+
+        try:
+            # Find a good channel for the invite (system channel or first text channel)
+            target = ctx.guild.system_channel or ctx.channel
+            invite = await target.create_invite(
+                max_age=0,       # Never expires
+                max_uses=0,      # Unlimited uses
+                reason="Permanent invite requested by owner"
+            )
+            await ctx.send(f"📨 **Permanent invite created:** {invite.url}")
+            logger.info(f"Permanent invite created: {invite.url}")
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to create invites. "
+                          "Please give me the `Create Invite` permission.")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)[:200]}")
 
 
 async def setup(bot: commands.Bot):
