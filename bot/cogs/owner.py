@@ -28,14 +28,23 @@ def is_owner(*, via_secret: bool = False):
 
     async def predicate(ctx: commands.Context):
         ok = await owner_auth.is_owner(ctx.author.id, via_secret=via_secret)
-        if not ok and via_secret:
-            try:
-                await ctx.reply(
-                    "🔒 This command requires authentication. Run `.ownerauth <your_secret>` first.",
-                    delete_after=15,
-                )
-            except Exception:
-                pass
+        if not ok:
+            if via_secret:
+                try:
+                    await ctx.reply(
+                        "🔒 This command requires authentication. Run `.ownerauth <your_secret>` first.",
+                        delete_after=15,
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await ctx.reply(
+                        "❌ Apenas o dono do bot pode usar este comando.",
+                        delete_after=10,
+                    )
+                except Exception:
+                    pass
         return ok
 
     return commands.check(predicate)

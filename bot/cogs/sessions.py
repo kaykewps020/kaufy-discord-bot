@@ -29,9 +29,10 @@ class SessionCog(commands.Cog):
         self._ai_semaphore = asyncio.Semaphore(2)
         self._queue = asyncio.Queue()
         self._worker_task = None
-        # 🛡️ Cache de message_ids pra evitar resposta duplicada
+        # 🛡️ Cache FIFO de message_ids pra evitar resposta duplicada
         self._processed_ids = set()
         self._processed_max = 1000
+        self._processed_order = []  # FIFO order
 
     async def cog_load(self):
         """Start the queue worker."""
@@ -97,6 +98,12 @@ class SessionCog(commands.Cog):
             try:
                 temperature = float(await db.get_config("temperature") or "0.8")
                 max_tokens = int(await db.get_config("max_tokens") or "4096")
+
+                # 🔒 VERIFY channel name starts with msg- — anti-conversation-mixing
+                ch_name = getattr(channel, 'name', str(channel))
+                if not ch_name.startswith("msg-"):
+                    logger.warning(f"Channel mismatch for user {author.id}: channel={ch_name}")
+                    return
 
                 # Check role-based temperature cap
                 if member:
@@ -283,7 +290,10 @@ class SessionCog(commands.Cog):
                     await message.remove_reaction(EMOJI_LOADING, self.bot.user)
                 except:
                     pass
-                await message.add_reaction(EMOJI_CHECK)
+                try:
+                    await message.add_reaction(EMOJI_CHECK)
+                except:
+                    pass
 
             except Exception as e:
                 logger.error(f"Session error for {author.id}: {e}")
@@ -329,13 +339,16 @@ class SessionCog(commands.Cog):
         if message.author.bot:
             return
 
-        # 🛡️ Dedup: ignora se já processamos esse message_id
+        # 🛡️ Dedup FIFO: ignora se já processamos esse message_id
         if message.id in self._processed_ids:
+            logger.debug(f"Dedup: skipping already-processed message {message.id}")
             return
         self._processed_ids.add(message.id)
-        # Limita o cache pra não vazar memória
-        if len(self._processed_ids) > self._processed_max:
-            self._processed_ids.clear()
+        self._processed_order.append(message.id)
+        # FIFO eviction — remove OLDEST, não limpa tudo
+        while len(self._processed_ids) > self._processed_max:
+            oldest = self._processed_order.pop(0)
+            self._processed_ids.discard(oldest)
 
         # Check if this is a user's msg channel (starts with "msg-")
         ch_base = _channel_base(message.channel.name)

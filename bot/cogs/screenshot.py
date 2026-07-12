@@ -350,8 +350,11 @@ class ScreenshotCog(commands.Cog):
         """Capture screenshot of a URL using playwright, with watermark."""
         if not HAS_PLAYWRIGHT:
             return await ctx.send(
-                "❌ Playwright não está instalado. Use `.screenshot gen <desc>` "
-                "para gerar visuais via AI, ou peça pro dono instalar playwright."
+                "❌ Playwright não está instalado (indisponível no Termux/Android).\n\n"
+                "✅ **`.screenshot gen <desc>` já funciona localmente** "
+                "— gera HTML/CSS por AI e renderiza pra PNG "
+                "com WeasyPrint + pdf2image.\n\n"
+                "Ou peça pro dono rodar no GitHub Actions (Playwright disponível no CI)."
             )
 
         # Add protocol if missing
