@@ -42,6 +42,7 @@ class KaufyBot(commands.Bot):
             "bot.cogs.roles",
             "bot.cogs.moderation",
             "bot.cogs.verify",
+            "bot.cogs.screenshot",
         ]
         for cog in cogs:
             try:

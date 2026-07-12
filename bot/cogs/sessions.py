@@ -125,6 +125,8 @@ class SessionCog(commands.Cog):
                         is_owner=is_owner,
                         plan=plan,
                         context_messages=plan_config.get("context_messages", 10),
+                        # Pass custom prompt if set
+                        custom_prompt=await db.get_config("custom_prompt") or "",
                     )
                     await runner.stop()
                 else:
@@ -138,6 +140,7 @@ class SessionCog(commands.Cog):
                             is_owner=is_owner,
                             plan=plan,
                             context_messages=plan_config.get("context_messages", 10),
+                            custom_prompt=await db.get_config("custom_prompt") or "",
                         )
                         await runner.stop()
 
@@ -145,10 +148,17 @@ class SessionCog(commands.Cog):
                 thinking_content = ""
                 clean_response = response
                 import re
+                
+                # First, find ALL thinking blocks (handles nested/multiple)
                 thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', response, re.DOTALL))
                 if thinking_matches:
                     thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
                     clean_response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
+                    logger.info(f"Found {len(thinking_matches)} thinking block(s), {len(thinking_content)} chars")
+                else:
+                    # If no thinking tags found, log the response start for debugging
+                    logger.debug(f"No thinking tags in response (first 300 chars): {response[:300]}")
+                    clean_response = response
 
                 # Send response (+ any files the model produced) — WITHOUT thinking tags
                 from pathlib import Path as _Path
@@ -160,6 +170,8 @@ class SessionCog(commands.Cog):
                             file_objs.append(discord.File(str(p)))
                         except Exception as e:
                             logger.error(f"Failed to attach file {fpath}: {e}")
+                
+                # Send complete response (never partial — wait for full opencode output)
                 await self._send_response(channel, clean_response, message, files=file_objs if file_objs else None)
 
                 # ── Route thinking content to #thinking channel (paid/owner only) ──
@@ -171,11 +183,23 @@ class SessionCog(commands.Cog):
                         )
                         if thinking_ch:
                             try:
-                                await thinking_ch.send(
-                                    f"**💭 {author}'s thinking:**\n{thinking_content[:1900]}"
-                                )
+                                # Split long thinking into chunks if needed
+                                chunks = [thinking_content[i:i+1900] for i in range(0, len(thinking_content), 1900)]
+                                for i, chunk in enumerate(chunks):
+                                    if i == 0:
+                                        await thinking_ch.send(
+                                            f"**💭 {author.display_name}'s reasoning:**\n{chunk}"
+                                        )
+                                    else:
+                                        await thinking_ch.send(f"**(continued)**\n{chunk}")
+                                    await asyncio.sleep(0.3)
+                                logger.info(f"Sent thinking to {thinking_ch.name} ({len(thinking_content)} chars in {len(chunks)} chunk(s))")
                             except Exception as e:
                                 logger.error(f"Failed to send thinking channel: {e}")
+                        else:
+                            logger.warning(f"Thinking channel not found in category {message.channel.category.name}")
+                    else:
+                        logger.warning("Message has no category — can't route thinking")
 
                 # Replace loading reaction with checkmark
                 try:

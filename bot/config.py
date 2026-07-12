@@ -89,7 +89,19 @@ class Config:
             "max_tokens_allowed": 4096,
             "web_search": False,
             "priority_queue": False,
+            "file_upload": True,         # Pode enviar arquivos pro AI
+            "file_storage": False,       # Sem armazenamento de arquivos
+            "custom_prompt": False,      # Sem prompt personalizado
+            "export_chat": False,        # Sem exportar conversa
+            "api_access": False,         # Sem API access
+            "premium_support": False,    # Sem suporte premium
+            "early_access": False,       # Sem early access
+            "unlimited_daily": False,    # Limite diário
+            "no_watermark": False,       # Tem watermark
+            "screenshot_gen": True,      # Screenshot generation via AI
             "description": "Free - 10 msgs/day",
+            "badge": "FREE",
+            "color": "#6b7280",
         },
         "7d": {
             "price_usd": 3.99,
@@ -101,7 +113,20 @@ class Config:
             "max_tokens_allowed": 8192,
             "web_search": True,
             "priority_queue": True,
-            "description": "7 days unlimited",
+            "file_upload": True,
+            "file_storage": True,        # 100MB storage
+            "file_storage_mb": 100,
+            "custom_prompt": False,
+            "export_chat": True,         # Pode exportar conversa
+            "api_access": False,
+            "premium_support": False,
+            "early_access": False,
+            "unlimited_daily": True,
+            "no_watermark": True,
+            "screenshot_gen": True,
+            "description": "7 Days • Unlimited",
+            "badge": "BASIC",
+            "color": "#3b82f6",
         },
         "14d": {
             "price_usd": 6.99,
@@ -113,7 +138,20 @@ class Config:
             "max_tokens_allowed": 8192,
             "web_search": True,
             "priority_queue": True,
-            "description": "14 days unlimited",
+            "file_upload": True,
+            "file_storage": True,
+            "file_storage_mb": 100,
+            "custom_prompt": True,       # Prompt personalizado
+            "export_chat": True,
+            "api_access": False,
+            "premium_support": False,
+            "early_access": False,
+            "unlimited_daily": True,
+            "no_watermark": True,
+            "screenshot_gen": True,
+            "description": "14 Days • Unlimited",
+            "badge": "STANDARD",
+            "color": "#8b5cf6",
         },
         "30d": {
             "price_usd": 9.99,
@@ -125,7 +163,20 @@ class Config:
             "max_tokens_allowed": 16384,
             "web_search": True,
             "priority_queue": True,
-            "description": "30 days unlimited",
+            "file_upload": True,
+            "file_storage": True,
+            "file_storage_mb": 500,
+            "custom_prompt": True,
+            "export_chat": True,
+            "api_access": True,          # API access
+            "premium_support": True,     # Suporte premium
+            "early_access": True,        # Early access a features
+            "unlimited_daily": True,
+            "no_watermark": True,
+            "screenshot_gen": True,
+            "description": "30 Days • Premium",
+            "badge": "PREMIUM",
+            "color": "#a855f7",
         },
         "lifetime": {
             "price_usd": 17.00,
@@ -137,8 +188,44 @@ class Config:
             "max_tokens_allowed": 16384,
             "web_search": True,
             "priority_queue": True,
-            "description": "Lifetime unlimited",
+            "file_upload": True,
+            "file_storage": True,
+            "file_storage_mb": 9999,     # 10GB storage
+            "custom_prompt": True,
+            "export_chat": True,
+            "api_access": True,
+            "premium_support": True,
+            "early_access": True,
+            "unlimited_daily": True,
+            "no_watermark": True,
+            "screenshot_gen": True,
+            "description": "Lifetime • Unlimited",
+            "badge": "ELITE",
+            "color": "#f59e0b",
         },
+    }
+
+    # Feature labels for display
+    FEATURE_LABELS = {
+        "thinking": "💭 Visible Thinking",
+        "web_search": "🌐 Web Search",
+        "priority_queue": "⚡ Priority Queue",
+        "file_upload": "📎 File Upload",
+        "file_storage": "💾 File Storage",
+        "custom_prompt": "✏️ Custom Prompt",
+        "export_chat": "📥 Export Chat",
+        "api_access": "🔌 API Access",
+        "premium_support": "💎 Premium Support",
+        "early_access": "🚀 Early Access",
+        "unlimited_daily": "♾️ Unlimited Daily",
+        "no_watermark": "🚫 No Watermark",
+        "screenshot_gen": "📸 Screenshot Gen",
+    }
+
+    FEATURE_DETAILS = {
+        "context_messages": "🧠 {} msg context",
+        "max_tokens_allowed": "📝 {} max tokens",
+        "file_storage_mb": "💾 {} MB storage",
     }
 
     # Crypto

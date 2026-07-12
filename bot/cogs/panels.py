@@ -74,46 +74,94 @@ def svg_usage_bar(current: int, max_msgs: int, plan: str = "free", daily: int = 
 </svg>'''
 
 
-def svg_plan_card(plan_id: str, plan: dict, active: bool = False) -> str:
-    """Single plan card SVG."""
-    border = "#6366f1" if active else "#2a2a4e"
-    glow = "0 0 20px rgba(99,102,241,0.3)" if active else "none"
-    price = f"${plan['price_usd']:.2f}" if plan['price_usd'] > 0 else "Free"
-    duration = plan['description']
+def _plan_features_list(plan: dict, plan_id: str) -> list:
+    """Get list of feature strings for a plan."""
     features = []
+
+    # Daily messages
     daily = plan.get("daily_messages", 999999)
     if daily < 999999:
-        features.append(f"{daily} messages per day")
-    elif plan['max_messages'] > 99999:
-        features.append("Unlimited messages")
+        features.append(f"📝 {daily} msgs/day")
     else:
-        features.append(f"{plan['max_messages']} messages")
-    if plan['thinking']:
-        features.append("Thinking mode")
-    if plan['price_usd'] > 0:
-        features.append("Priority support")
+        features.append("♾️ Unlimited messages")
+
+    # Context
+    ctx = plan.get("context_messages", 10)
+    features.append(f"🧠 {ctx} msg context")
+
+    # Tokens
+    toks = plan.get("max_tokens_allowed", 4096)
+    features.append(f"📏 {toks} max tokens")
+
+    # Thinking
+    features.append(f"💭 Thinking: {'✅' if plan.get('thinking') else '❌'}")
+
+    # Web search
+    features.append(f"🌐 Web Search: {'✅' if plan.get('web_search') else '❌'}")
+
+    # Priority
+    features.append(f"⚡ Priority: {'✅' if plan.get('priority_queue') else '❌'}")
+
+    # File storage
+    if plan.get("file_storage"):
+        mb = plan.get("file_storage_mb", 100)
+        features.append(f"💾 {mb}MB Storage: ✅")
     else:
-        features.append("Basic support")
-    if plan_id == "lifetime":
-        features.append("One-time payment")
+        features.append(f"💾 Storage: ❌")
+
+    # Custom prompt
+    features.append(f"✏️ Custom Prompt: {'✅' if plan.get('custom_prompt') else '❌'}")
+
+    # Export
+    features.append(f"📥 Export Chat: {'✅' if plan.get('export_chat') else '❌'}")
+
+    # API
+    features.append(f"🔌 API Access: {'✅' if plan.get('api_access') else '❌'}")
+
+    # Support
+    features.append(f"💎 Premium Support: {'✅' if plan.get('premium_support') else '❌'}")
+
+    return features
+
+
+def svg_plan_card(plan_id: str, plan: dict, active: bool = False) -> str:
+    """Single plan card SVG with full feature list."""
+    border = "#6366f1" if active else "#2a2a4e"
+    glow_effect = "0 0 25px rgba(99,102,241,0.4)" if active else "none"
+    price = f"${plan['price_usd']:.2f}" if plan['price_usd'] > 0 else "Free"
+    duration = plan['description']
+    badge = plan.get('badge', plan_id.upper())
+    color = plan.get('color', '#6366f1')
+
+    features = _plan_features_list(plan, plan_id)
+    # Highlight active plan
+    if active:
+        features.insert(0, "⭐ **YOUR CURRENT PLAN**")
 
     feat_lines = ""
     for i, f in enumerate(features):
         y = 95 + i * 20
-        feat_lines += f'<text x="25" y="{y}" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">- {f}</text>'
+        feat_lines += f'<text x="25" y="{y}" font-family="system-ui, sans-serif" font-size="10.5" fill="{color if active else "#9ca3af"}">{f}</text>'
 
-    y_offset = 95 + len(features) * 20 + 15
+    y_offset = 95 + len(features) * 20 + 25
 
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="380" height="{y_offset + 10}" viewBox="0 0 380 {y_offset + 10}">
   <defs>
-    <linearGradient id="bgc" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a1a2e"/><stop offset="1" stop-color="#16213e"/></linearGradient>
+    <linearGradient id="bgc_{plan_id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a1a2e"/><stop offset="1" stop-color="#16213e"/></linearGradient>
+    {f'<linearGradient id="act_{plan_id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{color}" stop-opacity="0.2"/><stop offset="1" stop-color="{color}" stop-opacity="0.05"/></linearGradient>' if active else ''}
   </defs>
-  <rect x="1" y="1" width="378" height="{y_offset + 8}" rx="14" fill="url(#bgc)" stroke="{border}" stroke-width="1.5" filter="{glow}"/>
-  <text x="25" y="35" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#e0e0e0">{duration}</text>
-  <text x="355" y="35" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#6366f1" text-anchor="end">{price}</text>
-  <line x1="25" y1="55" x2="355" y2="55" stroke="#2a2a4e" stroke-width="1"/>
+  <rect x="1" y="1" width="378" height="{y_offset + 8}" rx="14" fill="{'url(#act_' + plan_id + ')' if active else 'url(#bgc_' + plan_id + ')'}" stroke="{border}" stroke-width="1.5" filter="{glow_effect}"/>
+  
+  <!-- Badge -->
+  <rect x="25" y="15" width="{len(badge) * 8 + 16}" height="18" rx="4" fill="{color}" opacity="0.2"/>
+  <text x="33" y="28" font-family="system-ui, sans-serif" font-size="9" font-weight="600" fill="{color}">{badge}</text>
+  
+  <text x="25" y="55" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#e0e0e0">{duration}</text>
+  <text x="355" y="55" font-family="system-ui, sans-serif" font-size="22" font-weight="800" fill="{color}" text-anchor="end">{price}</text>
+  {f'<text x="355" y="70" font-family="system-ui, sans-serif" font-size="9" fill="#6b7280" text-anchor="end">one-time</text>' if plan_id == "lifetime" else ''}
+  <line x1="25" y1="78" x2="355" y2="78" stroke="#2a2a4e" stroke-width="1"/>
   {feat_lines}
-  {f'<rect x="25" y="{y_offset - 5}" width="330" height="32" rx="8" fill="#6366f1" opacity="0.15"/><text x="190" y="{y_offset + 15}" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6366f1" text-anchor="middle">ACTIVE</text>' if active else ''}
+  {f'<rect x="25" y="{y_offset - 5}" width="330" height="32" rx="8" fill="{color}" opacity="0.15"/><text x="190" y="{y_offset + 15}" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="{color}" text-anchor="middle">✅ ACTIVE</text>' if active else ''}
 </svg>'''
 
 
@@ -121,18 +169,26 @@ def svg_plans_grid(active_plan: str = "free") -> str:
     """Grid of all plans as a single SVG."""
     cards = ""
     y = 0
+    idx = 0
     for pid, pdata in Config.PLANS.items():
         is_active = pid == active_plan
         card_svg = svg_plan_card(pid, pdata, is_active)
-        # Extract height from SVG
         cards += f'<g transform="translate(0, {y})">{card_svg}</g>'
-        y += 220
+        # Calculate height dynamically - approx 95 + len(features)*20 + 35
+        feat_count = len(_plan_features_list(pdata, pid)) + (1 if is_active else 0)
+        y += 95 + feat_count * 20 + 45
+        idx += 1
 
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="420" height="{y + 20}" viewBox="0 0 420 {y + 20}">
-  <rect width="420" height="{y + 20}" rx="16" fill="#0f172a"/>
-  <text x="210" y="35" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#e0e0e0" text-anchor="middle">Available Plans</text>
-  <text x="210" y="55" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280" text-anchor="middle">Crypto payment only - BTC / ETH / USDT / SOL</text>
+    total_h = y + 30
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="420" height="{total_h}" viewBox="0 0 420 {total_h}">
+  <defs>
+    <linearGradient id="gridbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0a0a1a"/><stop offset="1" stop-color="#0f172a"/></linearGradient>
+  </defs>
+  <rect width="420" height="{total_h}" rx="16" fill="url(#gridbg)"/>
+  <text x="210" y="30" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#e0e0e0" text-anchor="middle">💎 Available Plans</text>
+  <text x="210" y="50" font-family="system-ui, sans-serif" font-size="10" fill="#6b7280" text-anchor="middle">Crypto payment — BTC / ETH / USDT / SOL</text>
   {cards}
+  <text x="210" y="{total_h - 10}" font-family="system-ui, sans-serif" font-size="9" fill="#4b5563" text-anchor="middle">All plans include 100% uncensored AI • Kaufy's Hall</text>
 </svg>'''
 
 
@@ -179,25 +235,66 @@ def svg_gift_card(plan_id: str, plan: dict, gift_code: str = "") -> str:
 </svg>'''
 
 
-def svg_config_panel(temperature: float, max_tokens: int, plan: str) -> str:
-    """Config status SVG with model info."""
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="420" height="180" viewBox="0 0 420 180">
+def svg_config_panel(temperature: float, max_tokens: int, plan: str, daily: int = 0, daily_limit: int = 10, context: int = 10, plan_config: dict = None) -> str:
+    """Config status SVG with model info and plan details."""
+    if plan_config is None:
+        plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
+    
+    is_unlimited = daily_limit >= 999999
+    usage_text = f"{daily} today" if not is_unlimited else "Unlimited"
+    pct = min((daily / daily_limit) * 100, 100) if daily_limit < 999999 and daily_limit > 0 else 0
+    bar_color = "#22c55e" if pct < 60 else "#eab308" if pct < 85 else "#ef4444"
+    
+    color = plan_config.get('color', '#6b7280')
+    thinking_yn = "✅" if plan_config.get('thinking') else "❌"
+    search_yn = "✅" if plan_config.get('web_search') else "❌"
+    priority_yn = "✅" if plan_config.get('priority_queue') else "❌"
+    storage_yn = "✅" if plan_config.get('file_storage') else "❌"
+    custom_yn = "✅" if plan_config.get('custom_prompt') else "❌"
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="420" height="270" viewBox="0 0 420 270">
   <defs>
     <linearGradient id="bgcf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1a1a2e"/><stop offset="1" stop-color="#16213e"/></linearGradient>
+    <linearGradient id="bar_grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="{bar_color}"/><stop offset="1" stop-color="{bar_color}" stop-opacity="0.7"/></linearGradient>
   </defs>
-  <rect width="420" height="180" rx="14" fill="url(#bgcf)" stroke="#2a2a4e" stroke-width="1"/>
-  <text x="25" y="30" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#e0e0e0">Configuration</text>
-  <line x1="25" y1="45" x2="395" y2="45" stroke="#2a2a4e" stroke-width="1"/>
-  <text x="25" y="70" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Temperature</text>
-  <text x="395" y="70" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{temperature}</text>
-  <text x="25" y="95" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Max Tokens</text>
-  <text x="395" y="95" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{max_tokens}</text>
-  <text x="25" y="120" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Plan</text>
-  <text x="395" y="120" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{plan}</text>
-  <text x="25" y="145" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Model</text>
-  <text x="395" y="145" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{Config.MODEL}</text>
-  <text x="25" y="168" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Messages</text>
-  <text x="395" y="168" font-family="system-ui, sans-serif" font-size="11" fill="#22c55e" text-anchor="end">Unlimited</text>
+  <rect width="420" height="270" rx="14" fill="url(#bgcf)" stroke="#2a2a4e" stroke-width="1"/>
+  
+  <!-- Header -->
+  <text x="25" y="28" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#e0e0e0">⚙️ Configuration</text>
+  <rect x="340" y="15" width="60" height="18" rx="4" fill="{color}" opacity="0.2"/>
+  <text x="370" y="28" font-family="system-ui, sans-serif" font-size="9" font-weight="600" fill="{color}" text-anchor="middle">{plan.upper()}</text>
+  
+  <line x1="25" y1="40" x2="395" y2="40" stroke="#2a2a4e" stroke-width="1"/>
+  
+  <!-- Usage bar -->
+  <text x="25" y="62" font-family="system-ui, sans-serif" font-size="10" fill="#9ca3af">Usage Today</text>
+  <text x="395" y="62" font-family="system-ui, sans-serif" font-size="10" fill="#e0e0e0" text-anchor="end">{usage_text}</text>
+  <rect x="25" y="70" width="370" height="8" rx="4" fill="#2a2a4e"/>
+  {f'<rect x="25" y="70" width="{370 * pct / 100 if is_unlimited else 0}" height="8" rx="4" fill="url(#bar_grad)"/>' if not is_unlimited else ''}
+  
+  <line x1="25" y1="92" x2="395" y2="92" stroke="#2a2a4e" stroke-width="0.5"/>
+  
+  <!-- Settings -->
+  <text x="25" y="112" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Temperature</text>
+  <text x="395" y="112" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{temperature}</text>
+  <text x="25" y="132" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Max Tokens</text>
+  <text x="395" y="132" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{max_tokens}</text>
+  <text x="25" y="152" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">Context Memory</text>
+  <text x="395" y="152" font-family="system-ui, sans-serif" font-size="11" fill="#e0e0e0" text-anchor="end">{context} msgs</text>
+  
+  <line x1="25" y1="165" x2="395" y2="165" stroke="#2a2a4e" stroke-width="0.5"/>
+  
+  <!-- Features -->
+  <text x="25" y="185" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">💭 Thinking Mode</text>
+  <text x="395" y="185" font-family="system-ui, sans-serif" font-size="11" fill="{color}" text-anchor="end">{thinking_yn}</text>
+  <text x="25" y="205" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">🌐 Web Search</text>
+  <text x="395" y="205" font-family="system-ui, sans-serif" font-size="11" fill="{color}" text-anchor="end">{search_yn}</text>
+  <text x="25" y="225" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">⚡ Priority Queue</text>
+  <text x="395" y="225" font-family="system-ui, sans-serif" font-size="11" fill="{color}" text-anchor="end">{priority_yn}</text>
+  <text x="25" y="245" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">💾 File Storage</text>
+  <text x="395" y="245" font-family="system-ui, sans-serif" font-size="11" fill="{color}" text-anchor="end">{storage_yn}</text>
+  <text x="25" y="262" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">✏️ Custom Prompt</text>
+  <text x="395" y="262" font-family="system-ui, sans-serif" font-size="11" fill="{color}" text-anchor="end">{custom_yn}</text>
 </svg>'''
 
 
@@ -319,55 +416,97 @@ class WelcomeView(discord.ui.View):
         from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel, get_thinking_panel
         is_owner = self.IS_OWNER(member.id)
         is_paid = is_owner or plan != "free"
+        plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
 
         # ── msg: Welcome embed ──
         desc_lines = [
-            f"{EMOJI_BOTS} I am Kaufy, your unrestricted technical AI assistant.\n",
-            f"{EMOJI_MANAGER} Ask me anything in this channel",
-            f"{EMOJI_SHOP} Configure your experience in {channels['config'].mention}",
+            f"{EMOJI_BOTS} **Kaufy** — your 100%% UNCENSORED AI assistant.\n",
+            f"{EMOJI_MANAGER} Ask **anything** — no filters, no refusals, no limits.",
+            f"{EMOJI_SHOP} Configure in {channels['config'].mention}",
         ]
         if is_paid:
-            desc_lines.append(f"{EMOJI_BOOSTER} Your **{plan.upper()}** plan is active")
+            desc_lines.append(f"{EMOJI_BOOSTER} **{plan_config['badge']}** plan active — all perks unlocked!")
             if "thinking" in channels:
-                desc_lines.append(f"{EMOJI_BOTS} Thinking mode active in {channels['thinking'].mention}")
+                desc_lines.append(f"{EMOJI_BOTS} 🧠 See my reasoning in {channels['thinking'].mention}")
         else:
-            desc_lines.append(f"{EMOJI_CART} Check plans in {channels['plans'].mention}")
-            desc_lines.append(f"{EMOJI_BOOSTER} 10 free messages per day")
+            desc_lines.append(f"{EMOJI_CART} 👉 Check {channels['plans'].mention} to unlock unlimited power")
+            desc_lines.append(f"{EMOJI_BOOSTER} 📝 10 free msgs/day • Upgrade for ♾️ unlimited")
 
         embed = discord.Embed(
             title=f"{EMOJI_BOTS} Welcome to Kaufy Hall",
             description="\n".join(desc_lines),
             color=0x9B59B6
         )
-        # Add plan benefits field
+        
+        # Build benefits list
+        benefits = []
         if is_paid:
-            ctx_msgs = Config.PLANS.get(plan, {}).get("context_messages", 50)
-            max_tok = Config.PLANS.get(plan, {}).get("max_tokens_allowed", 8192)
-            embed.add_field(
-                name=f"{EMOJI_BOOSTER} Your Benefits ({plan.upper()})",
-                value=(
-                    f"🧠 **{ctx_msgs} msg** context memory\n"
-                    f"📝 **{max_tok} tokens** max response\n"
-                    f"💭 Thinking mode: ✅\n"
-                    f"🌐 Web search: ✅\n"
-                    f"⚡ Priority queue: ✅\n"
-                    f"🚫 No daily limits"
-                ),
-                inline=False
-            )
+            ctx_msgs = plan_config.get("context_messages", 50)
+            max_tok = plan_config.get("max_tokens_allowed", 8192)
+            benefits.append(f"🧠 **{ctx_msgs} msg** context memory")
+            benefits.append(f"📝 **{max_tok} tokens** max response")
+            if plan_config.get("thinking"):
+                benefits.append(f"💭 **Thinking mode** — see AI reasoning")
+            if plan_config.get("web_search"):
+                benefits.append(f"🌐 **Web search** — real-time info")
+            if plan_config.get("priority_queue"):
+                benefits.append(f"⚡ **Priority queue** — skip the line")
+            if plan_config.get("file_storage"):
+                mb = plan_config.get("file_storage_mb", 100)
+                benefits.append(f"💾 **{mb}MB file storage**")
+            if plan_config.get("custom_prompt"):
+                benefits.append(f"✏️ **Custom system prompt**")
+            if plan_config.get("export_chat"):
+                benefits.append(f"📥 **Export conversations**")
+            if plan_config.get("api_access"):
+                benefits.append(f"🔌 **API access**")
+            if plan_config.get("premium_support"):
+                benefits.append(f"💎 **Premium support**")
+            if plan_config.get("early_access"):
+                benefits.append(f"🚀 **Early access** to new features")
+            benefits.append(f"♾️ **No daily limits**")
+            benefits.append(f"📸 **AI screenshot generation**")
+            benefits.append(f"🚫 **No censorship** — generate ANYTHING")
         else:
+            plan_7d = Config.PLANS.get("7d", {})
+            benefits.append(f"📝 10 msgs/day (free)")
+            benefits.append(f"🧠 10 msg context")
+            benefits.append(f"💭 Thinking mode: ❌")
+            benefits.append(f"🌐 Web search: ❌")
+            benefits.append(f"⚡ Standard queue")
+            benefits.append(f"")
+            benefits.append(f"**💎 Upgrade benefits:**")
+            benefits.append(f"♾️ Unlimited messages")
+            benefits.append(f"🧠 50-100 msg context")
+            benefits.append(f"📝 8K-16K tokens")
+            benefits.append(f"💭 Visible AI reasoning")
+            benefits.append(f"🌐 Web search + priority queue")
+            benefits.append(f"💾 File storage + export")
+            benefits.append(f"✏️ Custom prompts")
+            benefits.append(f"🔌 API access (30d/Lifetime)")
+            benefits.append(f"🔞 **100% uncensored — no filters**")
+
+        embed.add_field(
+            name=f"{EMOJI_BOOSTER} {'Your Benefits (' + plan_config.get('badge', plan.upper()) + ')' if is_paid else 'Free Plan vs Premium'}",
+            value="\n".join(benefits),
+            inline=False
+        )
+        
+        # Add payment info for free users
+        if not is_paid:
             embed.add_field(
-                name=f"{EMOJI_CART} Free Plan",
+                name=f"{EMOJI_LTC} Payment Methods",
                 value=(
-                    f"📝 10 msgs/day\n"
-                    f"🧠 10 msg context\n"
-                    f"💭 Thinking: ❌\n"
-                    f"🌐 Web search: ❌\n"
-                    f"⚡ Standard queue\n"
-                    f"💎 Upgrade for unlimited!"
+                    f"• **Bitcoin** (BTC)\n"
+                    f"• **Ethereum** (ETH)\n"
+                    f"• **USDT** (ERC-20)\n"
+                    f"• **Solana** (SOL)\n"
+                    f"• 🎁 Gift cards available\n\n"
+                    f"**Starting at just $3.99!**"
                 ),
                 inline=False
             )
+
         await channels["msg"].send(embed=embed)
 
         # ── config: Config panel ──
@@ -543,10 +682,11 @@ class ConfigView(discord.ui.View):
         tokens = int(configs.get("max_tokens", "4096"))
         daily = await db.get_daily_count()
         daily_limit = plan_config.get("daily_messages", 999999)
+        context = plan_config.get("context_messages", 10)
 
-        svg = svg_usage_bar(stats["messages"], stats["max_messages"], plan, daily, daily_limit)
-        file = discord.File(io.BytesIO(svg.encode()), filename="usage.svg")
-        msg = f"{EMOJI_BOOSTER} **Usage Stats**\n{EMOJI_MANAGER} Plan: `{plan}`  |  {EMOJI_BOTS} Model: `{Config.MODEL}`"
+        svg = svg_config_panel(temp, tokens, plan, daily, daily_limit, context, plan_config)
+        file = discord.File(io.BytesIO(svg.encode()), filename="config.svg")
+        msg = f"{EMOJI_BOOSTER} **Configuration & Stats**\n{EMOJI_MANAGER} Plan: `{plan_config.get('badge', plan.upper())}`  |  {EMOJI_BOTS} Model: `{Config.MODEL}`"
         await interaction.response.send_message(msg, file=file, ephemeral=True)
 
     @discord.ui.button(label="Reset to Defaults", style=discord.ButtonStyle.danger, custom_id="config_reset")
@@ -560,10 +700,92 @@ class ConfigView(discord.ui.View):
         await self._refresh_panel(interaction)
         await interaction.response.send_message("Configuration reset to defaults.", ephemeral=True)
 
+    @discord.ui.button(label="🗑️ Clear Context", style=discord.ButtonStyle.secondary, custom_id="config_clear")
+    async def clear_context(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Not your panel.", ephemeral=True)
+        db = UserDatabase(self.user_id)
+        await db.init()
+        async with db._lock:
+            import aiosqlite
+            async with aiosqlite.connect(db.db_path) as conn:
+                await conn.execute("DELETE FROM messages WHERE role IN ('user', 'assistant')")
+                await conn.commit()
+        await interaction.response.send_message("🗑️ Conversation context cleared. Kaufy will forget our previous chat.", ephemeral=True)
+
+    @discord.ui.button(label="📥 Export Chat", style=discord.ButtonStyle.secondary, custom_id="config_export")
+    async def export_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Not your panel.", ephemeral=True)
+        db = UserDatabase(self.user_id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
+        
+        if not plan_config.get("export_chat", False):
+            return await interaction.response.send_message(
+                "📥 Chat export is only available on paid plans (7d, 14d, 30d, Lifetime).",
+                ephemeral=True
+            )
+        
+        messages = await db.get_messages(limit=200)
+        if not messages:
+            return await interaction.response.send_message("No messages to export.", ephemeral=True)
+        
+        lines = []
+        for msg in messages:
+            role = msg["role"].upper()
+            content = msg["content"][:500]
+            lines.append(f"[{role}]\n{content}\n")
+        
+        text = "\n".join(lines)
+        file = discord.File(io.BytesIO(text.encode()), filename=f"chat_export_{self.user_id}.txt")
+        await interaction.response.send_message("📥 **Chat Export** — Here's your conversation:", file=file, ephemeral=True)
+
+    @discord.ui.button(label="✏️ Custom Prompt", style=discord.ButtonStyle.secondary, custom_id="config_prompt")
+    async def custom_prompt(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Not your panel.", ephemeral=True)
+        db = UserDatabase(self.user_id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
+        
+        if not plan_config.get("custom_prompt", False):
+            return await interaction.response.send_message(
+                "✏️ Custom system prompt is available on **14d, 30d, and Lifetime** plans.",
+                ephemeral=True
+            )
+        
+        await interaction.response.send_modal(CustomPromptModal(self.user_id))
+
     async def _refresh_panel(self, interaction: discord.Interaction):
         """Refresh the config channel with updated SVG."""
-        # This would re-send the config panel - for now just acknowledge
-        pass
+        db = UserDatabase(self.user_id)
+        await db.init()
+        configs = await db.get_all_config()
+        plan = await db.get_config("plan") or "free"
+        plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
+        temp = float(configs.get("temperature", "0.8"))
+        tokens = int(configs.get("max_tokens", "4096"))
+        daily = await db.get_daily_count()
+        daily_limit = plan_config.get("daily_messages", 999999)
+        context = plan_config.get("context_messages", 10)
+        
+        # Try to update the config channel message
+        try:
+            embed = discord.Embed(
+                title=f"{EMOJI_MANAGER} Configuration Panel",
+                description=(
+                    f"Adjust your AI experience below.\n\n"
+                    f"{EMOJI_BOTS} **Model:** {Config.MODEL}\n"
+                    f"{EMOJI_MANAGER} Use the dropdowns below to change settings."
+                ),
+                color=0x3498DB
+            )
+            await interaction.edit_original_response(embed=embed, view=ConfigView(self.user_id))
+        except:
+            pass
 
 
 class PlansView(discord.ui.View):
@@ -778,6 +1000,32 @@ class GiftPurchaseModal(discord.ui.Modal):
             f"{EMOJI_SHOP} Gift Code: `{gift_code}` — share this with the recipient.\n\n"
             f"{EMOJI_BOOSTER} Auto-activates within ~2 min after payment is confirmed.",
             file=file,
+            ephemeral=True
+        )
+
+
+class CustomPromptModal(discord.ui.Modal):
+    """Modal to set a custom system prompt for paid users."""
+    def __init__(self, user_id: int):
+        super().__init__(title="Set Custom System Prompt")
+        self.user_id = user_id
+
+    prompt = discord.ui.TextInput(
+        label="Custom Prompt",
+        placeholder="Enter custom instructions for Kaufy to follow...",
+        required=True,
+        min_length=10,
+        max_length=2000,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        db = UserDatabase(self.user_id)
+        await db.init()
+        await db.set_config("custom_prompt", self.prompt.value)
+        await interaction.response.send_message(
+            "✏️ **Custom prompt saved!** Kaufy will follow these instructions.\n"
+            f"```\n{self.prompt.value[:200]}{'...' if len(self.prompt.value) > 200 else ''}\n```",
             ephemeral=True
         )
 

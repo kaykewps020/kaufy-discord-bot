@@ -130,6 +130,26 @@ class UserDatabase:
                 )
                 await db.commit()
 
+    async def get_all_tokens(self) -> List[Dict]:
+        """Get ALL token records with full data."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM tokens ORDER BY id DESC")
+            rows = await cursor.fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                # Parse token_encrypted as JSON data for convenience
+                try:
+                    data = json.loads(d["token_encrypted"])
+                    d["data"] = d["token_encrypted"]
+                    d["type"] = data.get("type", d["service"])
+                except:
+                    d["data"] = d["token_encrypted"]
+                    d["type"] = d["service"]
+                result.append(d)
+            return result
+
     async def get_tokens(self, service: Optional[str] = None) -> List[Dict]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row

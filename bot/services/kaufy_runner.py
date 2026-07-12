@@ -146,6 +146,7 @@ class KaufyRunner:
         plan: str = "free",
         context_messages: int = 10,
         web_context: str = "",
+        custom_prompt: str = "",
     ) -> Tuple[str, List[str]]:
         """Send a prompt to Kaufy.
 
@@ -175,7 +176,13 @@ class KaufyRunner:
             user_context = await self._build_context(
                 username=username, is_owner=is_owner,
                 context_messages=context_messages,
+                custom_prompt=custom_prompt,
             )
+
+            # Prepend custom prompt if user has one
+            if custom_prompt:
+                user_context = f"[User Custom Instructions]\n{custom_prompt}\n\n---\n\n{user_context}"
+
             full_input = f"{user_context}\n\n---\n\n{prompt}"
             if web_context:
                 full_input = f"{user_context}\n\n---\n\n[Web Search Results]\n{web_context}\n\n---\n\nUser message: {prompt}"
@@ -391,7 +398,7 @@ class KaufyRunner:
 
     async def _build_context(
         self, *, username: Optional[str] = None, is_owner: bool = False,
-        context_messages: int = 10,
+        context_messages: int = 10, custom_prompt: str = "",
     ) -> str:
         """Build context from recent messages + embedded agent instructions.
 
