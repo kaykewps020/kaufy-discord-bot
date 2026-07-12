@@ -132,68 +132,88 @@ class SessionCog(commands.Cog):
                 
                 custom_prompt = await db.get_config("custom_prompt") or ""
                 runner = KaufyRunner(author.id, db)
-                pending = ""      # text waiting to be flushed
+                pending = ""      # raw text accumulating from stream
+                response_pending = ""  # ONLY response text (no thinking), for flush timing
+                response_sent_len = 0  # how much of response_pending we've sent already
                 full_response = ""
                 all_files = []
                 stream_done = False
-                anything_sent = False  # tracked so we can fallback if model gives empty response
+                anything_sent = False
+                thinking_sent = False
 
-                # Helper: flush pending text to Discord (with thinking formatted inline)
-                async def _flush():
-                    nonlocal pending, anything_sent
+                import re
+
+                async def _extract_and_send_thinking():
+                    """Extract <thinking> blocks from pending, send them as quote blocks,
+                    and REMOVE them from pending so only response text remains."""
+                    nonlocal pending, thinking_sent
                     if not pending.strip():
                         return
-                    
-                    # DON'T flush while inside an unclosed <thinking> tag
-                    if pending.count("<thinking>") > pending.count("</thinking>") and not stream_done:
+                    # Find all thinking blocks
+                    blocks = list(re.finditer(r'<thinking>(.*?)</thinking>', pending, re.DOTALL))
+                    if not blocks:
                         return
-                    
-                    import re
-                    
-                    # 1. Strip opencode preamble (! agent lines, > header lines, greetings)
-                    formatted = pending
-                    formatted = re.sub(r'^! agent.*\n?', '', formatted, flags=re.MULTILINE)
-                    formatted = re.sub(r'^> .*\n?', '', formatted, flags=re.MULTILINE)
-                    
-                    # Strip common greetings (case-insensitive multiline)
-                    greeting_pattern = r'^(i\'?m opencode|sou o opencode|olá! sou o|hello! i\'?m|hi,? i\'?m|hey there|opencode is a|how can i help you|what can i help)[\s\S]{0,200}?(\n---\n|\n\n|\. |! |\? )'
-                    formatted = re.sub(greeting_pattern, '', formatted, count=1, flags=re.IGNORECASE | re.DOTALL)
-                    
-                    # 2. Format thinking tags as quoted blocks
-                    def _format_thinking(m):
+                    for m in blocks:
                         content = m.group(1).strip()
                         if not content:
-                            return ""
+                            continue
                         lines = content.split("\n")
                         quoted = "\n".join(f"> {l}" for l in lines)
-                        return f"💭 **Thinking:**\n{quoted}\n"
+                        block = f"💭 **Thinking:**\n{quoted}"
+                        try:
+                            await channel.send(block)
+                            anything_sent = True
+                            thinking_sent = True
+                            await asyncio.sleep(0.2)
+                        except Exception as e:
+                            logger.error(f"Thinking send error: {e}")
+                    # Strip ALL thinking tags from pending
+                    pending = re.sub(r'<thinking>.*?</thinking>', '', pending, flags=re.DOTALL).strip()
+
+                async def _flush_response(force: bool = False):
+                    """Send accumulated response text to Discord.
                     
-                    formatted = re.sub(
-                        r'<thinking>(.*?)</thinking>',
-                        _format_thinking,
-                        formatted,
-                        flags=re.DOTALL
-                    ).strip()
-                    
-                    if not formatted:
+                    Only sends if:
+                    - force=True (stream done or flush forced), OR
+                    - we have >= 300 NEW chars since last send, OR
+                    - text ends with natural break and has >= 100 new chars
+                    """
+                    nonlocal response_pending, response_sent_len, anything_sent
+                    text = response_pending[response_sent_len:].strip()
+                    if not text:
                         return
-                    if len(formatted) < 6 and not stream_done:
+                    
+                    new_len = len(text)
+                    
+                    # Decide whether to send
+                    should_send = force or new_len >= 500 or (
+                        new_len >= 100 and any(text.rstrip().endswith(p) for p in ('.', '!', '?', ':\n', '.\n', '\n\n'))
+                    )
+                    if not should_send and not force:
+                        return
+                    
+                    # Also strip any leftover preamble noise
+                    clean = text
+                    clean = re.sub(r'^! agent.*\n?', '', clean, flags=re.MULTILINE)
+                    clean = re.sub(r'^> .*\n?', '', clean, flags=re.MULTILINE)
+                    clean = clean.strip()
+                    
+                    if not clean:
                         return
                     
                     try:
-                        if len(formatted) <= 1900:
-                            await channel.send(formatted)
+                        if len(clean) <= 1900:
+                            await channel.send(clean)
                             anything_sent = True
                         else:
-                            # Send ALL of formatted in 1900-char chunks (no data loss)
-                            for i in range(0, len(formatted), 1900):
-                                await channel.send(formatted[i:i+1900])
+                            for i in range(0, len(clean), 1900):
+                                await channel.send(clean[i:i+1900])
                                 await asyncio.sleep(0.4)
                                 anything_sent = True
                     except Exception as e:
                         logger.error(f"Flush error: {e}")
                     
-                    pending = ""  # Reset after flush
+                    response_sent_len = len(response_pending)  # mark all as sent
 
                 # Create stream
                 stream_kwargs = dict(
@@ -220,25 +240,31 @@ class SessionCog(commands.Cog):
                         if chunk:
                             pending += chunk
                             full_response += chunk
-                            # Flush on natural breaks or before hitting 1900
-                            should_flush = (
-                                pending.endswith("\n\n")
-                                or pending.endswith("</thinking>")
-                                or (len(pending) > 350 and "\n" in pending[-30:])
-                                or len(pending) > 1700  # Force flush before hitting 1900 limit
-                            )
-                            if should_flush:
-                                await _flush()
+                            response_pending = pending  # sync (thinking will be stripped later)
+                            
+                            # 1. Extract & send thinking blocks immediately when closed
+                            if "</thinking>" in pending:
+                                await _extract_and_send_thinking()
+                                # pending now has thinking stripped; resync
+                                response_pending = pending
+                                response_sent_len = 0  # restart send tracking
+                            
+                            # 2. Flush response text if enough accumulated
+                            await _flush_response(force=False)
 
                     elif event["type"] == "file":
                         all_files.append(event["path"])
 
                     elif event["type"] == "done":
                         stream_done = True
-                        await _flush()
+                        # One last thinking extraction + response flush
+                        await _extract_and_send_thinking()
+                        await _flush_response(force=True)
 
                     elif event["type"] == "error":
                         stream_done = True
+                        await _extract_and_send_thinking()
+                        await _flush_response(force=True)
                         await channel.send(event["text"])
                         full_response = event["text"]
 
@@ -246,7 +272,6 @@ class SessionCog(commands.Cog):
 
                 # ── Fallback: if nothing was sent (model gave empty/weird response) ──
                 if not anything_sent and full_response.strip():
-                    import re
                     clean = re.sub(r'<thinking>.*?</thinking>', '', full_response, flags=re.DOTALL).strip()
                     if clean:
                         await channel.send(clean[:1900])
@@ -257,12 +282,8 @@ class SessionCog(commands.Cog):
                 
                 if not anything_sent:
                     logger.warning(f"Empty response for user {author.id}: prompt={prompt[:100]!r}")
-                    # Don't send an error message to the user — they'll see the loading
-                    # reaction stay. The queue worker handles the next message fine.
                 
-                # ── Thinking tags were already shown inline via _flush() ──
-                # full_response still has raw <thinking> tags for logging
-                import re
+                # ── Log thinking stats ──
                 thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL))
                 if thinking_matches:
                     thinking_len = sum(len(m.group(1)) for m in thinking_matches)

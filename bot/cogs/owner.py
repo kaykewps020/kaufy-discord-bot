@@ -17,6 +17,23 @@ from bot.utils.helpers import format_uptime
 
 logger = logging.getLogger("kaufy.owner")
 
+class UserID(commands.Converter):
+    """Aceita ID numérico OU menção `<@123>` / `<@!123>`."""
+    async def convert(self, ctx: commands.Context, argument: str) -> int:
+        arg = argument.strip()
+        # 1. Raw int
+        if arg.isdigit() or (arg.startswith("-") and arg[1:].isdigit()):
+            return int(arg)
+        # 2. Mention: <@123> or <@!123>
+        if arg.startswith("<@") and arg.endswith(">"):
+            cleaned = arg.strip("<@!>")
+            if cleaned.isdigit():
+                return int(cleaned)
+        raise commands.BadArgument(
+            f"❌ `{argument}` não é um ID válido. Use o ID numérico ou menção."
+        )
+
+
 def is_owner(*, via_secret: bool = False):
     """Owner-access check — by default, just requires owner ID.
 
