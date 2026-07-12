@@ -130,23 +130,20 @@ class ScreenshotCog(commands.Cog):
                 logger.warning(f"Playwright render failed ({e}), trying WeasyPrint...")
 
         # Method 2: WeasyPrint + pdf2image (local/Termux — no JS)
-        import functools
+        # NOTA: WeasyPrint usa Pango/Cairo (C extensions) — NÃO roda em
+        # thread pool (run_in_executor). Rodamos síncrono direto (rápido).
         if HAS_WEASYPRINT:
             try:
-                html_content = html_file.read_text("utf-8")
-                loop = asyncio.get_event_loop()
-                pdf_bytes = await loop.run_in_executor(
-                    None, functools.partial(WeasyHTML(string=html_content).write_pdf)
-                )
-                images = await loop.run_in_executor(
-                    None, functools.partial(convert_from_bytes, pdf_bytes, fmt="png", dpi=150)
-                )
-                await loop.run_in_executor(None, images[0].save, png_path)
+                html_content = html_file.read_text("utf-8", errors="replace")
+                pdf_bytes = WeasyHTML(string=html_content).write_pdf()
+                images = convert_from_bytes(pdf_bytes, fmt="png", dpi=150)
+                images[0].save(png_path)
                 self._add_watermark(png_path)
                 logger.info(f"WeasyPrint rendered PNG: {png_path}")
                 return png_path
             except Exception as e:
                 logger.error(f"WeasyPrint render failed: {e}")
+                logger.debug("Traceback:", exc_info=True)
 
         logger.warning("No renderer available — can't convert HTML to PNG")
         return None

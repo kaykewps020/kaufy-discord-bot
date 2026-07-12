@@ -465,6 +465,9 @@ class KaufyRunner:
             # Capture files
             after = set(output_dir.iterdir())
             new_files = [str(f) for f in (after - before) if f.is_file()]
+            logger.info(f"File capture: before={len(before)}, after={len(after)}, new={len(new_files)}")
+            if new_files:
+                logger.info(f"New files: {new_files}")
             for fp in new_files:
                 yield {"type": "file", "path": fp}
 
