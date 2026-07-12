@@ -423,8 +423,9 @@ class KaufyRunner:
 
             raw_buffer = ""
             full_response = ""
+            prev_cleaned = ""  # Track what we've already yielded
 
-            # Read stdout chunk by chunk
+            # Read stdout chunk by chunk — yield only NEW text each time
             while True:
                 chunk = await self.process.stdout.read(400)
                 if not chunk:
@@ -435,9 +436,20 @@ class KaufyRunner:
 
                 # Strip preamble from the accumulated buffer
                 cleaned = self._strip_opencode_preamble(raw_buffer)
+                if not cleaned:
+                    continue  # Only preamble so far, skip
 
-                if cleaned:
-                    yield {"type": "chunk", "text": cleaned}
+                # Calculate delta (only new text since last yield)
+                if cleaned.startswith(prev_cleaned):
+                    new_text = cleaned[len(prev_cleaned):]
+                else:
+                    # Preamble detection changed — send all current content
+                    new_text = cleaned
+                
+                prev_cleaned = cleaned
+
+                if new_text.strip():
+                    yield {"type": "chunk", "text": new_text}
 
             exit_code = await self.process.wait()
 

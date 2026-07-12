@@ -125,42 +125,56 @@ class SessionCog(commands.Cog):
                 
                 custom_prompt = await db.get_config("custom_prompt") or ""
                 runner = KaufyRunner(author.id, db)
-                accumulated = ""
+                pending = ""      # text waiting to be flushed
                 full_response = ""
                 all_files = []
-                last_sent = 0
                 stream_done = False
-                sent_messages = []
+                anything_sent = False  # tracked so we can fallback if model gives empty response
 
-                # Helper: flush accumulated text to Discord (strip thinking)
+                # Helper: flush pending text to Discord (with thinking formatted inline)
                 async def _flush():
-                    nonlocal accumulated, last_sent, sent_messages
-                    if not accumulated.strip():
+                    nonlocal pending, anything_sent
+                    if not pending.strip():
                         return
                     
                     # DON'T flush while inside an unclosed <thinking> tag
-                    # (prevents thinking content leaking to main channel)
-                    open_tags = accumulated.count("<thinking>")
-                    close_tags = accumulated.count("</thinking>")
-                    if open_tags > close_tags and not stream_done:
-                        return  # still inside thinking block, wait for closing tag
+                    if pending.count("<thinking>") > pending.count("</thinking>") and not stream_done:
+                        return
                     
+                    # Format: replace <thinking>...</thinking> with quoted block
                     import re
-                    clean = re.sub(r'<thinking>.*?</thinking>', '', accumulated, flags=re.DOTALL).strip()
-                    if not clean:
+                    formatted = pending
+                    
+                    def _format_thinking(m):
+                        content = m.group(1).strip()
+                        if not content:
+                            return ""
+                        lines = content.split("\n")
+                        quoted = "\n".join(f"> {l}" for l in lines)
+                        return f"💭 **Thinking:**\n{quoted}\n"
+                    
+                    formatted = re.sub(
+                        r'<thinking>(.*?)</thinking>',
+                        _format_thinking,
+                        formatted,
+                        flags=re.DOTALL
+                    ).strip()
+                    
+                    if not formatted:
                         return
-                    # Only send the *new* part
-                    new_part = clean[last_sent:]
-                    if not new_part.strip():
+                    if len(formatted) < 6 and not stream_done:
                         return
-                    if len(new_part) < 8 and not stream_done:
-                        return  # too short, wait for more
+                    
                     try:
-                        msg = await channel.send(new_part[:1900])
-                        sent_messages.append(msg)
-                        last_sent = len(clean)
+                        if len(formatted) <= 1900:
+                            await channel.send(formatted)
+                        else:
+                            await channel.send(formatted[:1900])
+                        anything_sent = True
                     except Exception as e:
                         logger.error(f"Flush error: {e}")
+                    
+                    pending = ""  # Reset after flush
 
                 # Create stream
                 stream_kwargs = dict(
@@ -185,15 +199,13 @@ class SessionCog(commands.Cog):
                     if event["type"] == "chunk":
                         chunk = event["text"]
                         if chunk:
-                            accumulated += chunk
+                            pending += chunk
                             full_response += chunk
                             # Flush on natural breaks or periodically
-                            # Note: _flush() blocks if inside an unclosed <thinking> tag,
-                            # so we can safely request flushes even during thinking.
                             should_flush = (
-                                accumulated.endswith("\n\n")
-                                or accumulated.endswith("</thinking>")
-                                or (len(accumulated[last_sent:]) > 400 and "\n" in accumulated[-30:])
+                                pending.endswith("\n\n")
+                                or pending.endswith("</thinking>")
+                                or (len(pending) > 350 and "\n" in pending[-30:])
                             )
                             if should_flush:
                                 await _flush()
@@ -212,40 +224,29 @@ class SessionCog(commands.Cog):
 
                 await runner.stop()
 
-                # ── Parse ALL thinking tags for thinking channel ──
+                # ── Fallback: if nothing was sent (model gave empty/weird response) ──
+                if not anything_sent and full_response.strip():
+                    import re
+                    clean = re.sub(r'<thinking>.*?</thinking>', '', full_response, flags=re.DOTALL).strip()
+                    if clean:
+                        await channel.send(clean[:1900])
+                        anything_sent = True
+                    elif full_response.strip():
+                        await channel.send(full_response[:1900])
+                        anything_sent = True
+                
+                if not anything_sent:
+                    logger.warning(f"Empty response for user {author.id}: prompt={prompt[:100]!r}")
+                    # Don't send an error message to the user — they'll see the loading
+                    # reaction stay. The queue worker handles the next message fine.
+                
+                # ── Thinking tags were already shown inline via _flush() ──
+                # full_response still has raw <thinking> tags for logging
                 import re
-                thinking_content = ""
-                clean_response = re.sub(r'<thinking>.*?</thinking>', '', full_response, flags=re.DOTALL).strip()
                 thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL))
                 if thinking_matches:
-                    thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
-                    logger.info(f"Found {len(thinking_matches)} thinking block(s), {len(thinking_content)} chars")
-
-                # ── Route thinking to #thinking channel (paid users only) ──
-                if (is_owner or plan != "free") and thinking_content:
-                    if message.channel.category:
-                        thinking_ch = discord.utils.get(
-                            message.channel.category.channels,
-                            name__startswith="thinking-"
-                        )
-                        if thinking_ch:
-                            try:
-                                chunks = [thinking_content[i:i+1900] for i in range(0, len(thinking_content), 1900)]
-                                for i, chunk in enumerate(chunks):
-                                    if i == 0:
-                                        await thinking_ch.send(
-                                            f"**💭 {author.display_name}'s reasoning:**\n{chunk}"
-                                        )
-                                    else:
-                                        await thinking_ch.send(f"**(continued)**\n{chunk}")
-                                    await asyncio.sleep(0.3)
-                                logger.info(f"Sent thinking to {thinking_ch.name} ({len(thinking_content)} chars)")
-                            except Exception as e:
-                                logger.error(f"Failed to send thinking channel: {e}")
-                        else:
-                            logger.warning(f"Thinking channel not found in category")
-                    else:
-                        logger.warning("Message has no category — can't route thinking")
+                    thinking_len = sum(len(m.group(1)) for m in thinking_matches)
+                    logger.info(f"Found {len(thinking_matches)} thinking block(s), {thinking_len} chars inline")
 
                 # ── Attach files from output/ ──
                 if all_files:
@@ -326,6 +327,7 @@ class SessionCog(commands.Cog):
         # Check if this is a user's msg channel (starts with "msg-")
         ch_base = _channel_base(message.channel.name)
         if ch_base != Config.CHANNEL_MSG:
+            logger.debug(f"Ignored msg in #{message.channel.name} (base={ch_base}, need={Config.CHANNEL_MSG})")
             return
 
         # Ignora comandos (começam com .)
