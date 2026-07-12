@@ -37,6 +37,10 @@ class Config:
     MAX_MESSAGES_PER_USER = int(os.getenv("MAX_MESSAGES", "800"))
     RESTART_INTERVAL = int(os.getenv("RESTART_INTERVAL", "18000"))  # 5h
 
+    # Concurrency
+    MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "10"))
+    MAX_MSG_PER_CHANNEL_PER_MIN = int(os.getenv("MAX_MSG_PER_CHANNEL_PER_MIN", "15"))
+
     # Channels
     CHANNEL_MSG = "msg"
     CHANNEL_CONFIG = "config"

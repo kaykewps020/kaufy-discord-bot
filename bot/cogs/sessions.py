@@ -4,6 +4,7 @@ from discord.ext import commands
 import logging
 import asyncio
 import aiosqlite
+import time
 from bot.config import Config
 from bot.models.session import session_manager, UserSession
 from bot.models.user_db import UserDatabase
@@ -21,40 +22,62 @@ def _channel_base(name: str) -> str:
 
 
 class SessionCog(commands.Cog):
-    """Handles user sessions and message routing to Kaufy."""
+    """Handles user sessions and message routing to Kaufy — multi-worker."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # ⏳ Process queue: max 2 processos opencode simultâneos (evita database locked)
-        self._ai_semaphore = asyncio.Semaphore(2)
+        # ⏳ Fila: múltiplos workers paralelos processam mensagens
         self._queue = asyncio.Queue()
-        self._worker_task = None
+        self._worker_tasks = []
+        self._num_workers = Config.MAX_CONCURRENT_WORKERS
         # 🛡️ Cache FIFO de message_ids pra evitar resposta duplicada
         self._processed_ids = set()
-        self._processed_max = 1000
-        self._processed_order = []  # FIFO order
+        self._processed_max = 5000
+        self._processed_order = []
+        # 🚦 Rate limiter por channel (max msgs/min)
+        self._channel_rate: dict[int, list[float]] = {}
+        self._max_per_channel_per_min = Config.MAX_MSG_PER_CHANNEL_PER_MIN
 
     async def cog_load(self):
-        """Start the queue worker."""
-        self._worker_task = asyncio.create_task(self._queue_worker())
-        logger.info("AI queue worker started (max 2 concurrent)")
+        """Start N queue workers."""
+        for i in range(self._num_workers):
+            task = asyncio.create_task(self._queue_worker(i))
+            self._worker_tasks.append(task)
+        logger.info(f"Started {self._num_workers} AI queue workers")
 
     async def cog_unload(self):
-        if self._worker_task:
-            self._worker_task.cancel()
+        for t in self._worker_tasks:
+            t.cancel()
+        await asyncio.gather(*self._worker_tasks, return_exceptions=True)
 
-    async def _queue_worker(self):
-        """Process AI messages one at a time to save RAM."""
+    def _check_channel_rate(self, channel_id: int) -> bool:
+        """True if this channel can send another message (rate limit check)."""
+        now = time.monotonic()
+        window = self._channel_rate.get(channel_id, [])
+        # Remove timestamps older than 60s
+        window = [t for t in window if now - t < 60]
+        if len(window) >= self._max_per_channel_per_min:
+            return False
+        window.append(now)
+        self._channel_rate[channel_id] = window
+        return True
+
+    async def _queue_worker(self, worker_id: int):
+        """Process messages from the queue — runs in parallel with other workers."""
+        logger.info(f"Worker {worker_id} started")
         while True:
             try:
                 msg, channel, author, db, prompt = await asyncio.wait_for(self._queue.get(), timeout=300)
+                logger.debug(f"Worker {worker_id} picked up msg {msg.id} from user {author.id}")
                 await self._process_message(msg, channel, author, db, prompt)
+                self._queue.task_done()
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
+                logger.info(f"Worker {worker_id} cancelled")
                 break
             except Exception as e:
-                logger.error(f"Queue worker error: {e}")
+                logger.error(f"Worker {worker_id} error: {e}")
 
     async def _process_message(self, message, channel, author, db, prompt=""):
         """Actually process a message (called from queue worker).
@@ -122,9 +145,6 @@ class SessionCog(commands.Cog):
                 from bot.services.owner_auth import owner_auth
                 is_owner = await owner_auth.is_owner(author.id, via_secret=False)
 
-                # Priority queue: paid users skip the semaphore
-                priority = is_owner or plan_config.get("priority_queue", False)
-
                 # ── STREAMING RESPONSE ──────────────────────────────────
                 # Use run_stream() to get partial chunks. Send text to
                 # Discord periodically so the user sees progress, especially
@@ -160,11 +180,11 @@ class SessionCog(commands.Cog):
                         lines = content.split("\n")
                         quoted = "\n".join(f"> {l}" for l in lines)
                         block = f"💭 **Thinking:**\n{quoted}"
+                        await asyncio.sleep(0.3)
                         try:
                             await channel.send(block)
                             anything_sent = True
                             thinking_sent = True
-                            await asyncio.sleep(0.2)
                         except Exception as e:
                             logger.error(f"Thinking send error: {e}")
                     # Strip ALL thinking tags from pending
@@ -201,6 +221,7 @@ class SessionCog(commands.Cog):
                     if not clean:
                         return
                     
+                    await asyncio.sleep(0.3)
                     try:
                         if len(clean) <= 1900:
                             await channel.send(clean)
@@ -208,7 +229,7 @@ class SessionCog(commands.Cog):
                         else:
                             for i in range(0, len(clean), 1900):
                                 await channel.send(clean[i:i+1900])
-                                await asyncio.sleep(0.4)
+                                await asyncio.sleep(0.5)
                                 anything_sent = True
                     except Exception as e:
                         logger.error(f"Flush error: {e}")
@@ -227,11 +248,7 @@ class SessionCog(commands.Cog):
                     custom_prompt=custom_prompt,
                 )
 
-                if priority:
-                    stream = runner.run_stream(**stream_kwargs)
-                else:
-                    async with self._ai_semaphore:
-                        stream = runner.run_stream(**stream_kwargs)
+                stream = runner.run_stream(**stream_kwargs)
 
                 # Process events
                 async for event in stream:
