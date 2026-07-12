@@ -58,6 +58,10 @@ class SessionCog(commands.Cog):
     async def _process_message(self, message, channel, author, db, prompt=""):
         """Actually process a message (called from queue worker).
         
+        Uses STREAMING — sends partial responses as they arrive.
+        When opencode uses a tool/subagent, the response up to that
+        point is flushed to Discord so the user sees progress.
+        
         Args:
             prompt: The full prompt including file attachments (if any).
                     Falls back to message.content if empty.
@@ -114,67 +118,100 @@ class SessionCog(commands.Cog):
                 # Priority queue: paid users skip the semaphore
                 priority = is_owner or plan_config.get("priority_queue", False)
 
-                # Run Kaufy (skip semaphore for priority users)
+                # ── STREAMING RESPONSE ──────────────────────────────────
+                # Use run_stream() to get partial chunks. Send text to
+                # Discord periodically so the user sees progress, especially
+                # when the model pauses to use a tool/subagent.
+                
+                custom_prompt = await db.get_config("custom_prompt") or ""
+                runner = KaufyRunner(author.id, db)
+                accumulated = ""
+                full_response = ""
+                all_files = []
+                last_sent = 0
+                stream_done = False
+                sent_messages = []
+
+                # Helper: flush accumulated text to Discord (strip thinking)
+                async def _flush():
+                    nonlocal accumulated, last_sent, sent_messages
+                    if not accumulated.strip():
+                        return
+                    import re
+                    clean = re.sub(r'<thinking>.*?</thinking>', '', accumulated, flags=re.DOTALL).strip()
+                    if not clean:
+                        return
+                    # Only send the *new* part
+                    new_part = clean[last_sent:]
+                    if not new_part.strip():
+                        return
+                    if len(new_part) < 8 and not stream_done:
+                        return  # too short, wait for more
+                    try:
+                        msg = await channel.send(new_part[:1900])
+                        sent_messages.append(msg)
+                        last_sent = len(clean)
+                    except Exception as e:
+                        logger.error(f"Flush error: {e}")
+
+                # Create stream
+                stream_kwargs = dict(
+                    prompt=prompt or message.content,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    username=str(author),
+                    is_owner=is_owner,
+                    plan=plan,
+                    context_messages=plan_config.get("context_messages", 10),
+                    custom_prompt=custom_prompt,
+                )
+
                 if priority:
-                    runner = KaufyRunner(author.id, db)
-                    response, files = await runner.run(
-                        prompt or message.content,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        username=str(author),
-                        is_owner=is_owner,
-                        plan=plan,
-                        context_messages=plan_config.get("context_messages", 10),
-                        # Pass custom prompt if set
-                        custom_prompt=await db.get_config("custom_prompt") or "",
-                    )
-                    await runner.stop()
+                    stream = runner.run_stream(**stream_kwargs)
                 else:
                     async with self._ai_semaphore:
-                        runner = KaufyRunner(author.id, db)
-                        response, files = await runner.run(
-                            prompt or message.content,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            username=str(author),
-                            is_owner=is_owner,
-                            plan=plan,
-                            context_messages=plan_config.get("context_messages", 10),
-                            custom_prompt=await db.get_config("custom_prompt") or "",
-                        )
-                        await runner.stop()
+                        stream = runner.run_stream(**stream_kwargs)
 
-                # ── Parse <thinking> tags from response ──
-                thinking_content = ""
-                clean_response = response
+                # Process events
+                async for event in stream:
+                    if event["type"] == "chunk":
+                        chunk = event["text"]
+                        if chunk:
+                            accumulated += chunk
+                            full_response += chunk
+                            # Flush on natural breaks or periodically
+                            should_flush = (
+                                accumulated.endswith("\n\n")
+                                or "</thinking>" in accumulated
+                                or (len(accumulated[last_sent:]) > 400 and "\n" in accumulated[-30:])
+                            )
+                            if should_flush:
+                                await _flush()
+
+                    elif event["type"] == "file":
+                        all_files.append(event["path"])
+
+                    elif event["type"] == "done":
+                        stream_done = True
+                        await _flush()
+
+                    elif event["type"] == "error":
+                        stream_done = True
+                        await channel.send(event["text"])
+                        full_response = event["text"]
+
+                await runner.stop()
+
+                # ── Parse ALL thinking tags for thinking channel ──
                 import re
-                
-                # First, find ALL thinking blocks (handles nested/multiple)
-                thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', response, re.DOTALL))
+                thinking_content = ""
+                clean_response = re.sub(r'<thinking>.*?</thinking>', '', full_response, flags=re.DOTALL).strip()
+                thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL))
                 if thinking_matches:
                     thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
-                    clean_response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
                     logger.info(f"Found {len(thinking_matches)} thinking block(s), {len(thinking_content)} chars")
-                else:
-                    # If no thinking tags found, log the response start for debugging
-                    logger.debug(f"No thinking tags in response (first 300 chars): {response[:300]}")
-                    clean_response = response
 
-                # Send response (+ any files the model produced) — WITHOUT thinking tags
-                from pathlib import Path as _Path
-                file_objs = []
-                for fpath in files or []:
-                    p = _Path(fpath)
-                    if p.is_file():
-                        try:
-                            file_objs.append(discord.File(str(p)))
-                        except Exception as e:
-                            logger.error(f"Failed to attach file {fpath}: {e}")
-                
-                # Send complete response (never partial — wait for full opencode output)
-                await self._send_response(channel, clean_response, message, files=file_objs if file_objs else None)
-
-                # ── Route thinking content to #thinking channel (paid/owner only) ──
+                # ── Route thinking to #thinking channel (paid users only) ──
                 if (is_owner or plan != "free") and thinking_content:
                     if message.channel.category:
                         thinking_ch = discord.utils.get(
@@ -183,7 +220,6 @@ class SessionCog(commands.Cog):
                         )
                         if thinking_ch:
                             try:
-                                # Split long thinking into chunks if needed
                                 chunks = [thinking_content[i:i+1900] for i in range(0, len(thinking_content), 1900)]
                                 for i, chunk in enumerate(chunks):
                                     if i == 0:
@@ -193,13 +229,30 @@ class SessionCog(commands.Cog):
                                     else:
                                         await thinking_ch.send(f"**(continued)**\n{chunk}")
                                     await asyncio.sleep(0.3)
-                                logger.info(f"Sent thinking to {thinking_ch.name} ({len(thinking_content)} chars in {len(chunks)} chunk(s))")
+                                logger.info(f"Sent thinking to {thinking_ch.name} ({len(thinking_content)} chars)")
                             except Exception as e:
                                 logger.error(f"Failed to send thinking channel: {e}")
                         else:
-                            logger.warning(f"Thinking channel not found in category {message.channel.category.name}")
+                            logger.warning(f"Thinking channel not found in category")
                     else:
                         logger.warning("Message has no category — can't route thinking")
+
+                # ── Attach files from output/ ──
+                if all_files:
+                    from pathlib import Path as _Path
+                    file_objs = []
+                    for fpath in all_files:
+                        p = _Path(fpath)
+                        if p.is_file():
+                            try:
+                                file_objs.append(discord.File(str(p)))
+                            except Exception as e:
+                                logger.error(f"Failed to attach file {fpath}: {e}")
+                    if file_objs:
+                        try:
+                            await channel.send("📎 **Arquivos gerados:**", files=file_objs)
+                        except Exception as e:
+                            logger.error(f"Failed to send files: {e}")
 
                 # Replace loading reaction with checkmark
                 try:
@@ -210,7 +263,12 @@ class SessionCog(commands.Cog):
 
             except Exception as e:
                 logger.error(f"Session error for {author.id}: {e}")
-                await channel.send(f"An error occurred: {str(e)[:200]}")
+                import traceback
+                logger.error(traceback.format_exc())
+                try:
+                    await channel.send(f"An error occurred: {str(e)[:200]}")
+                except:
+                    pass
 
     async def _process_attachments(self, message: discord.Message) -> str:
         """Download attachments and return their content as context string."""
@@ -348,12 +406,16 @@ class SessionCog(commands.Cog):
         except Exception as e:
             web_context = f"[Web search failed: {e}]"
 
-        # Now process the query with web context
+        # Now process the query with web context (streaming)
         from bot.services.owner_auth import owner_auth
         is_owner = await owner_auth.is_owner(ctx.author.id, via_secret=False)
         runner = KaufyRunner(ctx.author.id, db)
-        response, files = await runner.run(
-            f"Based on web search results, answer: {query}",
+        full_response = ""
+        stream_done = False
+        last_sent = 0
+
+        async for event in runner.run_stream(
+            prompt=f"Based on web search results, answer: {query}",
             temperature=0.8,
             max_tokens=plan_config.get("max_tokens_allowed", 4096),
             username=str(ctx.author),
@@ -361,17 +423,26 @@ class SessionCog(commands.Cog):
             plan=plan,
             context_messages=plan_config.get("context_messages", 10),
             web_context=web_context,
-        )
+        ):
+            if event["type"] == "chunk":
+                full_response += event["text"]
+                # Flush new text periodically
+                await ctx.send(event["text"])
+            elif event["type"] == "done":
+                stream_done = True
+            elif event["type"] == "error":
+                await ctx.send(event["text"])
+                full_response = event["text"]
+                stream_done = True
+
         await runner.stop()
 
         # Parse thinking tags
         thinking_content = ""
-        clean_response = response
         import re
-        thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', response, re.DOTALL))
+        thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL))
         if thinking_matches:
             thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
-            clean_response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
 
         # Route thinking
         if (is_owner or plan != "free") and thinking_content and ctx.channel.category:
@@ -383,8 +454,6 @@ class SessionCog(commands.Cog):
                     await thinking_ch.send(f"**💭 {ctx.author}'s thinking (search):**\n{thinking_content[:1900]}")
                 except:
                     pass
-
-        await self._send_response(ctx.channel, clean_response, ctx.message)
 
     @commands.command(name="planinfo")
     async def plan_info(self, ctx: commands.Context):

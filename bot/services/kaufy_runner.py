@@ -346,16 +346,65 @@ class KaufyRunner:
             finally:
                 self.process = None
 
-    async def run_stream(self, prompt: str, temperature: float = 0.8, *, username: Optional[str] = None) -> AsyncIterator[str]:
-        """Stream response from Kaufy chunk by chunk."""
+    async def run_stream(
+        self,
+        prompt: str,
+        temperature: float = 0.8,
+        max_tokens: int = 4096,
+        *,
+        username: Optional[str] = None,
+        is_owner: bool = False,
+        plan: str = "free",
+        context_messages: int = 10,
+        web_context: str = "",
+        custom_prompt: str = "",
+    ) -> AsyncIterator[dict]:
+        """Stream response from Kaufy chunk by chunk.
+
+        Yields dicts:
+          {"type": "chunk", "text": str}           — partial text
+          {"type": "file", "path": str}             — file written to output/
+          {"type": "done", "full_response": str}    — stream complete
+          {"type": "error", "text": str}            — error occurred
+        """
         user_home = self._user_home()
         agent_path = await self.ensure_agent_file()
 
-        user_context = await self._build_context(username=username)
-        full_input = f"{user_context}\n\n---\n\n{prompt}"
+        # Per-run output capture dir
+        output_dir = Path(user_home) / Config.OUTPUT_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for old in output_dir.glob("*"):
+            try:
+                if old.is_file():
+                    old.unlink()
+            except OSError:
+                pass
+        before = set(output_dir.iterdir())
 
-        # opencode pinned to v1.17.9 — --model string is safe (no conversion bug).
+        # Build input with user context
+        user_context = await self._build_context(
+            username=username, is_owner=is_owner,
+            context_messages=context_messages,
+            custom_prompt=custom_prompt,
+        )
+
+        if custom_prompt:
+            user_context = f"[User Custom Instructions]\n{custom_prompt}\n\n---\n\n{user_context}"
+
+        full_input = f"{user_context}\n\n---\n\n{prompt}"
+        if web_context:
+            full_input = f"{user_context}\n\n---\n\n[Web Search Results]\n{web_context}\n\n---\n\nUser message: {prompt}"
+
         cmd = ["opencode", "run"]
+
+        # Pre-flight agent check
+        if agent_path:
+            agent_file_path = Path(agent_path)
+            if agent_file_path.exists():
+                logger.info(f"✓ Agent file EXISTS for stream: {agent_path}")
+            else:
+                agent_path = await self.ensure_agent_file()
+
         if agent_path:
             cmd += ["--agent", "kaufy"]
         cmd += ["--model", "opencode/big-pickle"]
@@ -372,29 +421,100 @@ class KaufyRunner:
                 env=self._bot_env(user_home)
             )
 
+            raw_buffer = ""
             full_response = ""
+
+            # Read stdout chunk by chunk
             while True:
-                chunk = await self.process.stdout.read(200)
+                chunk = await self.process.stdout.read(400)
                 if not chunk:
                     break
                 decoded = chunk.decode()
+                raw_buffer += decoded
                 full_response += decoded
-                yield decoded
+
+                # Strip preamble from the accumulated buffer
+                cleaned = self._strip_opencode_preamble(raw_buffer)
+
+                if cleaned:
+                    yield {"type": "chunk", "text": cleaned}
 
             exit_code = await self.process.wait()
+
+            # Handle non-zero exit
             if exit_code != 0:
                 error = await self.process.stderr.read()
-                logger.warning(f"Stream exit {exit_code} user {self.user_id}: {error.decode()[:200]}")
+                err_text = error.decode()[:500]
+                logger.warning(f"Stream exit {exit_code} user {self.user_id}: {err_text}")
+                if not full_response.strip():
+                    yield {"type": "error", "text": f"⚠️ Process error (code {exit_code})"}
+                    return
+
+            # Strip final response
+            final_cleaned = self._strip_opencode_preamble(full_response)
+
+            # Check if agent loaded
+            fallback_phrases = ["i'm opencode", "sou o opencode", "i am opencode",
+                               "how can i help you today?", "opencode, a cli tool"]
+            if any(phrase in final_cleaned.lower() for phrase in fallback_phrases):
+                logger.warning(f"Agent NOT loaded in stream! Full output: {full_response[:300]}")
+                yield {"type": "error", "text": "⚠️ Kaufy agent failed to load. The owner has been notified."}
+                return
+
+            # Capture files
+            after = set(output_dir.iterdir())
+            new_files = [str(f) for f in (after - before) if f.is_file()]
+            for fp in new_files:
+                yield {"type": "file", "path": fp}
 
             # Store in DB
             await self.db.add_message("user", prompt)
-            await self.db.add_message("assistant", full_response)
+            await self.db.add_message("assistant", final_cleaned)
+
+            yield {"type": "done", "full_response": final_cleaned}
 
         except Exception as e:
             logger.error(f"Stream error for user {self.user_id}: {e}")
-            yield f"⚠️ Error: {str(e)[:200]}"
+            yield {"type": "error", "text": f"⚠️ Error: {str(e)[:200]}"}
         finally:
             self.process = None
+
+    @staticmethod
+    def _strip_opencode_preamble(text: str) -> str:
+        """Strip opencode wrapper/preamble from model output.
+
+        Returns the cleaned text (may be empty if only preamble so far).
+        """
+        # Remove ! agent lines
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.startswith("! agent")]
+        text = "\n".join(lines)
+
+        # Remove > header lines
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.startswith("> ")]
+        text = "\n".join(lines)
+
+        # Remove opencode greeting at start
+        greeting_phrases = [
+            "i'm opencode", "sou o opencode", "olá! sou o",
+            "hello! i'm", "hi, i'm", "hey there",
+            "opencode is a cli tool", "i am opencode",
+            "how can i help you", "what can i help",
+        ]
+        text_lower = text.strip().lower()
+        for phrase in greeting_phrases:
+            if text_lower.startswith(phrase):
+                for sep in ["\n---\n", "\n\n", ". ", "! ", "? "]:
+                    idx = text.find(sep)
+                    if idx != -1 and idx < 200:
+                        rest = text[idx + len(sep):].strip()
+                        if rest and len(rest) > 10:
+                            text = rest
+                            break
+                break
+
+        return text.strip()
 
     async def _build_context(
         self, *, username: Optional[str] = None, is_owner: bool = False,
