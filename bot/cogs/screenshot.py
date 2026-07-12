@@ -135,15 +135,19 @@ class ScreenshotCog(commands.Cog):
         if HAS_WEASYPRINT:
             try:
                 html_content = html_file.read_text("utf-8", errors="replace")
+                logger.info(f"WeasyPrint rendering {len(html_content)}b HTML to PNG...")
                 pdf_bytes = WeasyHTML(string=html_content).write_pdf()
+                logger.info(f"PDF generated: {len(pdf_bytes)} bytes")
                 images = convert_from_bytes(pdf_bytes, fmt="png", dpi=150)
                 images[0].save(png_path)
+                logger.info(f"PNG saved: {png_path}")
                 self._add_watermark(png_path)
-                logger.info(f"WeasyPrint rendered PNG: {png_path}")
+                logger.info(f"WeasyPrint rendered PNG with watermark: {png_path}")
                 return png_path
             except Exception as e:
                 logger.error(f"WeasyPrint render failed: {e}")
-                logger.debug("Traceback:", exc_info=True)
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
 
         logger.warning("No renderer available — can't convert HTML to PNG")
         return None
