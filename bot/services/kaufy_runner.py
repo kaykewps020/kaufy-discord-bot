@@ -11,6 +11,7 @@ Now also supports:
   * A configurable / infinite per-response timeout.
 """
 import asyncio
+import codecs
 import json
 import logging
 import os
@@ -423,14 +424,17 @@ class KaufyRunner:
 
             full_response = ""
 
+            # Incremental UTF-8 decoder — NUNCA quebra caracteres multi-byte
+            utf8_decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
             # Read stdout chunk by chunk — yield RAW chunks without stripping.
             # Preamble stripping is done in sessions.py _flush() to avoid
             # delta-tracking bugs when stripping changes between chunks.
             while True:
-                chunk = await self.process.stdout.read(400)
+                chunk = await self.process.stdout.read(4096)
                 if not chunk:
                     break
-                decoded = chunk.decode()
+                decoded = utf8_decoder.decode(chunk)
                 full_response += decoded
 
                 if decoded.strip():
@@ -441,7 +445,7 @@ class KaufyRunner:
             # Handle non-zero exit
             if exit_code != 0:
                 error = await self.process.stderr.read()
-                err_text = error.decode()[:500]
+                err_text = error.decode("utf-8", errors="replace")[:500]
                 logger.warning(f"Stream exit {exit_code} user {self.user_id}: {err_text}")
                 if not full_response.strip():
                     yield {"type": "error", "text": f"⚠️ Process error (code {exit_code})"}
