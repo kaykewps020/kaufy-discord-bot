@@ -28,13 +28,22 @@ from bot.services.kaufy_runner import KaufyRunner
 
 logger = logging.getLogger("kaufy.screenshot")
 
-# Tentar importar playwright (opcional)
+# Tentar importar playwright (opcional — usado no CI)
 try:
     from playwright.async_api import async_playwright
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
-    logger.info("Playwright not installed — screenshot will use AI generation")
+    logger.info("Playwright não instalado — fallback pra WeasyPrint")
+
+# WeasyPrint + pdf2image como fallback local (Termux-friendly)
+try:
+    from weasyprint import HTML as WeasyHTML
+    from pdf2image import convert_from_bytes
+    HAS_WEASYPRINT = True
+except ImportError:
+    HAS_WEASYPRINT = False
+    logger.warning("WeasyPrint/pdf2image não disponível — .gen envia HTML puro")
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -84,48 +93,63 @@ class ScreenshotCog(commands.Cog):
             await ctx.send("Use este comando no seu canal #msg.")
 
     async def _render_html_to_png(self, html_path: str) -> Optional[str]:
-        """Render a local HTML file to PNG using Playwright.
+        """Render a local HTML file to PNG.
         
+        Tries Playwright first (CI), then WeasyPrint+pdf2image (local).
         Returns path to the PNG file, or None if rendering failed.
         The PNG will have the server watermark added.
         """
-        if not HAS_PLAYWRIGHT:
-            logger.warning("Playwright not available — can't render HTML to PNG")
+        html_file = Path(html_path).resolve()
+        if not html_file.is_file():
+            logger.error(f"HTML file not found: {html_path}")
             return None
 
         png_path = str(html_path).replace(".html", ".png").replace(".htm", ".png")
         if png_path == html_path:
             png_path = html_path + ".png"
 
-        try:
-            html_file = Path(html_path).resolve()
-            if not html_file.is_file():
-                logger.error(f"HTML file not found: {html_path}")
-                return None
+        # Method 1: Playwright (CI — best quality, JS support)
+        if HAS_PLAYWRIGHT:
+            try:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=["--no-sandbox", "--disable-setuid-sandbox"]
+                    )
+                    page = await browser.new_page(
+                        viewport={"width": 1280, "height": 720}
+                    )
+                    await page.goto(html_file.as_uri(), timeout=15000, wait_until="networkidle")
+                    await asyncio.sleep(1)
+                    await page.screenshot(path=png_path, full_page=True)
+                    await browser.close()
+                self._add_watermark(png_path)
+                logger.info(f"Playwright rendered PNG: {png_path}")
+                return png_path
+            except Exception as e:
+                logger.warning(f"Playwright render failed ({e}), trying WeasyPrint...")
 
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox"]
+        # Method 2: WeasyPrint + pdf2image (local/Termux — no JS)
+        import functools
+        if HAS_WEASYPRINT:
+            try:
+                html_content = html_file.read_text("utf-8")
+                loop = asyncio.get_event_loop()
+                pdf_bytes = await loop.run_in_executor(
+                    None, functools.partial(WeasyHTML(string=html_content).write_pdf)
                 )
-                page = await browser.new_page(
-                    viewport={"width": 1280, "height": 720}
+                images = await loop.run_in_executor(
+                    None, functools.partial(convert_from_bytes, pdf_bytes, fmt="png", dpi=150)
                 )
-                # Open local file
-                await page.goto(html_file.as_uri(), timeout=15000, wait_until="networkidle")
-                await asyncio.sleep(1)  # Let any CSS animations finish
+                await loop.run_in_executor(None, images[0].save, png_path)
+                self._add_watermark(png_path)
+                logger.info(f"WeasyPrint rendered PNG: {png_path}")
+                return png_path
+            except Exception as e:
+                logger.error(f"WeasyPrint render failed: {e}")
 
-                await page.screenshot(path=png_path, full_page=True)
-                await browser.close()
-
-            # Add watermark
-            self._add_watermark(png_path)
-            logger.info(f"Rendered HTML to PNG: {png_path}")
-            return png_path
-
-        except Exception as e:
-            logger.error(f"HTML→PNG render failed: {e}")
-            return None
+        logger.warning("No renderer available — can't convert HTML to PNG")
+        return None
 
     @screenshot_group.command(name="gen")
     async def screenshot_gen(self, ctx: commands.Context, *, description: str):
@@ -195,7 +219,7 @@ class ScreenshotCog(commands.Cog):
                 continue
             ext = p.suffix.lower()
 
-            if ext in (".html", ".htm") and HAS_PLAYWRIGHT:
+            if ext in (".html", ".htm") and (HAS_PLAYWRIGHT or HAS_WEASYPRINT):
                 # Render to PNG
                 png_path = await self._render_html_to_png(str(p))
                 if png_path:
@@ -235,7 +259,9 @@ class ScreenshotCog(commands.Cog):
 
         lines = [
             "📸 **Screenshot System**\n",
-            f"Playwright: {'✅ Instalado' if HAS_PLAYWRIGHT else '❌ Não instalado'}",
+            f"Playwright: {'✅' if HAS_PLAYWRIGHT else '❌'} (CI/browser — JS suportado)",
+            f"WeasyPrint: {'✅' if HAS_WEASYPRINT else '❌'} (local/Termux — HTML/CSS estático)",
+            f"Watermark: {'✅' if HAS_PILLOW else '❌'} (Pillow)",
             f"AI Screenshot Gen: ✅ Sempre disponível",
             f"Output dir: `./output/` (capturado automaticamente)",
             "",

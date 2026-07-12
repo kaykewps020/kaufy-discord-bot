@@ -95,17 +95,24 @@ jobs:
           echo "=== OPENCODE_API_KEY set? ==="
           [ -z "$OPENCODE_API_KEY" ] && echo "NOT SET" || echo "IS SET (masked)"
 
+      - name: System deps for WeasyPrint (pango/cairo)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpango-1.0-0 libpangocairo-1.0-0 \
+            libgdk-pixbuf2.0-0 libcairo2 libffi-dev shared-mime-info
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt 2>/dev/null || \
             pip install discord.py aiohttp aiosqlite
-          pip install Pillow playwright
+          pip install Pillow playwright weasyprint pdf2image
 
       - name: Install Playwright Chromium
         run: |
           python3 -m playwright install chromium
           python3 -c "from playwright.sync_api import sync_playwright; print('Playwright ✅')"
+          python3 -c "from weasyprint import HTML; print('WeasyPrint ✅')"
 
       - name: Restore database from git backup
         run: |
