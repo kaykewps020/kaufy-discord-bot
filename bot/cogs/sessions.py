@@ -137,6 +137,14 @@ class SessionCog(commands.Cog):
                     nonlocal accumulated, last_sent, sent_messages
                     if not accumulated.strip():
                         return
+                    
+                    # DON'T flush while inside an unclosed <thinking> tag
+                    # (prevents thinking content leaking to main channel)
+                    open_tags = accumulated.count("<thinking>")
+                    close_tags = accumulated.count("</thinking>")
+                    if open_tags > close_tags and not stream_done:
+                        return  # still inside thinking block, wait for closing tag
+                    
                     import re
                     clean = re.sub(r'<thinking>.*?</thinking>', '', accumulated, flags=re.DOTALL).strip()
                     if not clean:
@@ -180,9 +188,11 @@ class SessionCog(commands.Cog):
                             accumulated += chunk
                             full_response += chunk
                             # Flush on natural breaks or periodically
+                            # Note: _flush() blocks if inside an unclosed <thinking> tag,
+                            # so we can safely request flushes even during thinking.
                             should_flush = (
                                 accumulated.endswith("\n\n")
-                                or "</thinking>" in accumulated
+                                or accumulated.endswith("</thinking>")
                                 or (len(accumulated[last_sent:]) > 400 and "\n" in accumulated[-30:])
                             )
                             if should_flush:

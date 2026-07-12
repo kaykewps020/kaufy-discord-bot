@@ -38,3 +38,8 @@ config.local.json
 
 # Isolated opencode data (bot sessions, separate from user's own opencode)
 opencode_data/
+
+# Node.js (playwright install)
+node_modules/
+package-lock.json
+package.json

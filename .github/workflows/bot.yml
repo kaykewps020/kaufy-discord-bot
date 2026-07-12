@@ -100,6 +100,12 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt 2>/dev/null || \
             pip install discord.py aiohttp aiosqlite
+          pip install Pillow playwright
+
+      - name: Install Playwright Chromium
+        run: |
+          python3 -m playwright install chromium
+          python3 -c "from playwright.sync_api import sync_playwright; print('Playwright ✅')"
 
       - name: Restore database from git backup
         run: |

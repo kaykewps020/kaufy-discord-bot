@@ -1,7 +1,7 @@
 """Screenshot cog — tira screenshots de URLs ou gera visuais via AI.
 
 Comandos:
-  .screenshot [url]          — Tira screenshot de uma URL (se playwright disponível)
+  .screenshot [url]          — Tira screenshot de uma URL (com watermark do servidor)
   .screenshot gen <desc>     — Pede pra AI gerar um screenshot/visual baseado em descrição
   .screenshot info           — Mostra status do sistema de screenshot
 
@@ -9,6 +9,9 @@ O modelo AI também pode GERAR screenshots autônomamente:
 - Escrevendo HTML/CSS/SVG em ./output/
 - Usando playwright se disponível
 - Gerando representações visuais de código, conceitos, etc.
+
+Watermark: Adiciona marca d'água semi-transparente com o link de invite
+do servidor em todos os screenshots capturados.
 """
 import discord
 from discord.ext import commands
@@ -31,6 +34,18 @@ try:
 except ImportError:
     HAS_PLAYWRIGHT = False
     logger.info("Playwright not installed — screenshot will use AI generation")
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
+    logger.info("Pillow not installed — watermark disabled")
+
+# Config watermark
+WATERMARK_TEXT = "kaufy.hall"
+WATERMARK_OPACITY = 0.20  # 20% opacity — semi-transparent
+INVITE_LINK = "https://discord.gg/kaufyhall"
 
 SCREENSHOT_DIR = Path(__file__).resolve().parent.parent.parent / "screenshots"
 
@@ -152,8 +167,77 @@ class ScreenshotCog(commands.Cog):
 
         await ctx.send("\n".join(lines))
 
+    def _add_watermark(self, image_path: str) -> str:
+        """Add semi-transparent watermark to a screenshot image.
+        
+        Returns the path to the watermarked image (same file modified in-place).
+        """
+        if not HAS_PILLOW:
+            logger.warning("Pillow not available — skipping watermark")
+            return image_path
+
+        try:
+            img = Image.open(image_path).convert("RGBA")
+            
+            # Create watermark overlay
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            
+            # Try to load a font, fall back to default
+            font = None
+            for font_path in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            ]:
+                if Path(font_path).exists():
+                    font_size = max(img.width // 25, 20)
+                    try:
+                        font = ImageFont.truetype(font_path, font_size)
+                    except:
+                        pass
+                    break
+            
+            # Watermark text
+            watermark_text = f"{WATERMARK_TEXT}  •  {INVITE_LINK}"
+            
+            # Position: bottom-right corner with padding
+            padding = 20
+            if font:
+                bbox = draw.textbbox((0, 0), watermark_text, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+            else:
+                tw, th = len(watermark_text) * 8, 16
+            
+            x = img.width - tw - padding
+            y = img.height - th - padding
+            
+            # Draw shadow/background bar for readability
+            bar_height = th + 20
+            bar = Image.new("RGBA", (tw + 40, bar_height), (0, 0, 0, 180))
+            overlay.paste(bar, (x - 10, y - 10), bar)
+            
+            # Draw watermark text
+            alpha = int(255 * WATERMARK_OPACITY)
+            fill_color = (255, 255, 255, alpha)
+            if font:
+                draw.text((x, y), watermark_text, font=font, fill=fill_color)
+            else:
+                draw.text((x, y), watermark_text, fill=fill_color)
+            
+            # Composite
+            img = Image.alpha_composite(img, overlay).convert("RGB")
+            img.save(image_path, "PNG")
+            logger.info(f"Watermark added to {image_path}")
+            
+        except Exception as e:
+            logger.error(f"Watermark failed: {e}")
+        
+        return image_path
+
     async def _capture_url(self, ctx: commands.Context, url: str):
-        """Capture screenshot of a URL using playwright."""
+        """Capture screenshot of a URL using playwright, with watermark."""
         if not HAS_PLAYWRIGHT:
             return await ctx.send(
                 "❌ Playwright não está instalado. Use `.screenshot gen <desc>` "
@@ -181,6 +265,9 @@ class ScreenshotCog(commands.Cog):
                 screenshot_path = SCREENSHOT_DIR / f"screenshot_{ctx.author.id}_{int(asyncio.get_event_loop().time())}.png"
                 await page.screenshot(path=str(screenshot_path), full_page=False)
                 await browser.close()
+
+                # Add watermark
+                self._add_watermark(str(screenshot_path))
 
                 # Send
                 file = discord.File(str(screenshot_path), filename="screenshot.png")

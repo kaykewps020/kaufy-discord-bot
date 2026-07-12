@@ -509,7 +509,7 @@ class WelcomeView(discord.ui.View):
 
         await channels["msg"].send(embed=embed)
 
-        # ── config: Config panel ──
+        # ── config: Config panel (global persistent view) ──
         await channels["config"].send(
             embed=discord.Embed(
                 title=f"{EMOJI_MANAGER} Configuration Panel",
@@ -520,10 +520,10 @@ class WelcomeView(discord.ui.View):
                 ),
                 color=0x3498DB
             ),
-            view=ConfigView(member.id)
+            view=ConfigView()
         )
 
-        # ── thinking: Thinking panel (paid only) ──
+        # ── thinking: Thinking panel (paid only, global view) ──
         if is_paid and "thinking" in channels:
             ctx_msgs = Config.PLANS.get(plan, {}).get("context_messages", 50)
             await channels["thinking"].send(
@@ -540,10 +540,10 @@ class WelcomeView(discord.ui.View):
                     ),
                     color=0x22C55E
                 ),
-                view=ThinkingView(member.id, plan)
+                view=ThinkingView()
             )
 
-        # ── plans: Plans panel (free only) ──
+        # ── plans: Plans panel (free only, global view) ──
         if not is_paid and "plans" in channels:
             await channels["plans"].send(
                 embed=discord.Embed(
@@ -566,7 +566,7 @@ class WelcomeView(discord.ui.View):
                     ),
                     color=0x2ECC71
                 ),
-                view=PlansView(member.id)
+                view=PlansView()
             )
 
     @discord.ui.button(label="🚀 Start Chatting", style=discord.ButtonStyle.primary, custom_id="welcome_chat")
@@ -623,10 +623,21 @@ class WelcomeView(discord.ui.View):
 
 
 class ConfigView(discord.ui.View):
-    """Configuration panel with dropdowns and buttons - no emojis."""
-    def __init__(self, user_id: int):
+    """Configuration panel with dropdowns and buttons - global persistent view.
+
+    Each config channel is user-private, so interaction.user.id is always
+    the channel owner. We use it directly instead of storing per-user state.
+    """
+    def __init__(self):
         super().__init__(timeout=None)
-        self.user_id = user_id
+
+    async def _get_user_id(self, interaction: discord.Interaction) -> int:
+        """Get the target user ID for this config panel.
+        
+        The channel is user-private, so the clicking user is the owner.
+        For owner-created panels, the channel's first non-bot member is used.
+        """
+        return interaction.user.id
 
     @discord.ui.select(
         placeholder="Temperature...",
@@ -641,12 +652,11 @@ class ConfigView(discord.ui.View):
         custom_id="config_temp"
     )
     async def set_temperature(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your configuration panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         await db.set_config("temperature", select.values[0])
-        await self._refresh_panel(interaction)
+        await self._refresh_panel(interaction, user_id)
         await interaction.response.send_message(f"Temperature set to {select.values[0]}.", ephemeral=True)
 
     @discord.ui.select(
@@ -660,21 +670,18 @@ class ConfigView(discord.ui.View):
         custom_id="config_tokens"
     )
     async def set_tokens(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your configuration panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         await db.set_config("max_tokens", select.values[0])
-        await self._refresh_panel(interaction)
+        await self._refresh_panel(interaction, user_id)
         await interaction.response.send_message(f"Max tokens set to {select.values[0]}.", ephemeral=True)
 
     @discord.ui.button(label="Show Stats", style=discord.ButtonStyle.secondary, custom_id="config_stats")
     async def show_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your configuration panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
-        stats = await db.get_stats()
         configs = await db.get_all_config()
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
@@ -691,20 +698,18 @@ class ConfigView(discord.ui.View):
 
     @discord.ui.button(label="Reset to Defaults", style=discord.ButtonStyle.danger, custom_id="config_reset")
     async def reset_config(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your configuration panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         await db.set_config("temperature", "0.8")
         await db.set_config("max_tokens", "4096")
-        await self._refresh_panel(interaction)
+        await self._refresh_panel(interaction, user_id)
         await interaction.response.send_message("Configuration reset to defaults.", ephemeral=True)
 
     @discord.ui.button(label="🗑️ Clear Context", style=discord.ButtonStyle.secondary, custom_id="config_clear")
     async def clear_context(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("Not your panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         async with db._lock:
             import aiosqlite
@@ -715,9 +720,8 @@ class ConfigView(discord.ui.View):
 
     @discord.ui.button(label="📥 Export Chat", style=discord.ButtonStyle.secondary, custom_id="config_export")
     async def export_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("Not your panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
@@ -739,14 +743,13 @@ class ConfigView(discord.ui.View):
             lines.append(f"[{role}]\n{content}\n")
         
         text = "\n".join(lines)
-        file = discord.File(io.BytesIO(text.encode()), filename=f"chat_export_{self.user_id}.txt")
+        file = discord.File(io.BytesIO(text.encode()), filename=f"chat_export_{user_id}.txt")
         await interaction.response.send_message("📥 **Chat Export** — Here's your conversation:", file=file, ephemeral=True)
 
     @discord.ui.button(label="✏️ Custom Prompt", style=discord.ButtonStyle.secondary, custom_id="config_prompt")
     async def custom_prompt(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("Not your panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
@@ -757,11 +760,11 @@ class ConfigView(discord.ui.View):
                 ephemeral=True
             )
         
-        await interaction.response.send_modal(CustomPromptModal(self.user_id))
+        await interaction.response.send_modal(CustomPromptModal(user_id))
 
-    async def _refresh_panel(self, interaction: discord.Interaction):
+    async def _refresh_panel(self, interaction: discord.Interaction, user_id: int):
         """Refresh the config channel with updated SVG."""
-        db = UserDatabase(self.user_id)
+        db = UserDatabase(user_id)
         await db.init()
         configs = await db.get_all_config()
         plan = await db.get_config("plan") or "free"
@@ -783,52 +786,40 @@ class ConfigView(discord.ui.View):
                 ),
                 color=0x3498DB
             )
-            await interaction.edit_original_response(embed=embed, view=ConfigView(self.user_id))
+            await interaction.edit_original_response(embed=embed, view=ConfigView())
         except:
             pass
 
 
 class PlansView(discord.ui.View):
-    """Plans panel with crypto payment buttons and gift option."""
-    def __init__(self, user_id: int):
+    """Plans panel with crypto payment buttons and gift option. Global persistent view."""
+    def __init__(self):
         super().__init__(timeout=None)
-        self.user_id = user_id
 
     @discord.ui.button(label="7 Days - $3.99", style=discord.ButtonStyle.primary, custom_id="plan_7d")
     async def plan_7d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your panel.", ephemeral=True)
         await self._show_payment(interaction, "7d")
 
     @discord.ui.button(label="14 Days - $6.99", style=discord.ButtonStyle.primary, custom_id="plan_14d")
     async def plan_14d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your panel.", ephemeral=True)
         await self._show_payment(interaction, "14d")
 
     @discord.ui.button(label="30 Days - $9.99", style=discord.ButtonStyle.primary, custom_id="plan_30d")
     async def plan_30d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your panel.", ephemeral=True)
         await self._show_payment(interaction, "30d")
 
     @discord.ui.button(label="Lifetime - $29.99", style=discord.ButtonStyle.success, custom_id="plan_lifetime")
     async def plan_lifetime(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your panel.", ephemeral=True)
         await self._show_payment(interaction, "lifetime")
 
     @discord.ui.button(label="Gift a Plan", style=discord.ButtonStyle.secondary, custom_id="plan_gift")
     async def gift_plan(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your panel.", ephemeral=True)
         await interaction.response.send_modal(GiftPurchaseModal())
 
     @discord.ui.button(label="My Plan Info", style=discord.ButtonStyle.secondary, custom_id="plan_info")
     async def plan_info(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This is not your panel.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
@@ -1129,21 +1120,19 @@ class GiftRedeemModal(discord.ui.Modal):
 
 
 class ThinkingView(discord.ui.View):
-    """Thinking mode panel for premium users."""
-    def __init__(self, user_id: int, plan: str = "free"):
+    """Thinking mode panel for premium users. Global persistent view."""
+    def __init__(self):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.plan = plan
 
     @discord.ui.button(label="Show Thinking", style=discord.ButtonStyle.primary, custom_id="thinking_show")
     async def show_thinking(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("Not your panel.", ephemeral=True)
-        if self.plan == "free":
-            plans_ch = discord.utils.get(interaction.guild.text_channels, name="plans")
-            plans_mention = plans_ch.mention if plans_ch else "#plans"
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        if plan == "free":
             return await interaction.response.send_message(
-                f"Thinking mode is only available on paid plans. Check {plans_mention} to upgrade.",
+                "Thinking mode is only available on paid plans. Check your #plans channel to upgrade.",
                 ephemeral=True
             )
         await interaction.response.send_message(
@@ -1154,12 +1143,12 @@ class ThinkingView(discord.ui.View):
 
     @discord.ui.button(label="My Files", style=discord.ButtonStyle.secondary, custom_id="thinking_files")
     async def list_files(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("Not your panel.", ephemeral=True)
-        if self.plan == "free":
-            return await interaction.response.send_message("File storage requires a paid plan.", ephemeral=True)
-        db = UserDatabase(self.user_id)
+        user_id = interaction.user.id
+        db = UserDatabase(user_id)
         await db.init()
+        plan = await db.get_config("plan") or "free"
+        if plan == "free":
+            return await interaction.response.send_message("File storage requires a paid plan.", ephemeral=True)
         files = await db.get_files()
         if not files:
             return await interaction.response.send_message("No files saved yet.", ephemeral=True)
@@ -1174,11 +1163,11 @@ class ThinkingView(discord.ui.View):
 def get_welcome_panel() -> WelcomeView:
     return WelcomeView()
 
-def get_config_panel(user_id: int) -> ConfigView:
-    return ConfigView(user_id)
+def get_config_panel() -> ConfigView:
+    return ConfigView()
 
-def get_plans_panel(user_id: int) -> PlansView:
-    return PlansView(user_id)
+def get_plans_panel() -> PlansView:
+    return PlansView()
 
-def get_thinking_panel(user_id: int, plan: str = "free") -> ThinkingView:
-    return ThinkingView(user_id, plan)
+def get_thinking_panel() -> ThinkingView:
+    return ThinkingView()

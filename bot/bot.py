@@ -9,7 +9,7 @@ from bot.config import Config
 from bot.models.session import session_manager
 from bot.services.backup import backup_service
 from bot.services.payment import payment_service
-from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel, get_thinking_panel
+from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel, get_thinking_panel, ConfigView, PlansView, ThinkingView
 
 logger = logging.getLogger("kaufy.bot")
 
@@ -56,9 +56,11 @@ class KaufyBot(commands.Bot):
         backup_service.start_background_backup()
         payment_service.start_background_polling()
 
-        # Register persistent views
+        # Register all persistent views (survive restarts)
         self.add_view(get_welcome_panel())
-        # Config/plans views are per-user, registered on demand
+        self.add_view(ConfigView())
+        self.add_view(PlansView())
+        self.add_view(ThinkingView())
 
         # Sync commands
         await self.tree.sync()
