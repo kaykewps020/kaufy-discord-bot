@@ -666,7 +666,7 @@ class KaufyRunner:
             parts.append("## Recent conversation history")
             for msg in messages:
                 role = msg["role"]
-                content = msg["content"][:max_chars]
+                content = self._sanitize_input(msg["content"])[:max_chars]
                 parts.append(f"[{role}]: {content}")
         return "\n".join(parts)
 
