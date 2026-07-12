@@ -141,10 +141,18 @@ class SessionCog(commands.Cog):
                     if pending.count("<thinking>") > pending.count("</thinking>") and not stream_done:
                         return
                     
-                    # Format: replace <thinking>...</thinking> with quoted block
                     import re
-                    formatted = pending
                     
+                    # 1. Strip opencode preamble (! agent lines, > header lines, greetings)
+                    formatted = pending
+                    formatted = re.sub(r'^! agent.*\n?', '', formatted, flags=re.MULTILINE)
+                    formatted = re.sub(r'^> .*\n?', '', formatted, flags=re.MULTILINE)
+                    
+                    # Strip common greetings (case-insensitive multiline)
+                    greeting_pattern = r'^(i\'?m opencode|sou o opencode|olá! sou o|hello! i\'?m|hi,? i\'?m|hey there|opencode is a|how can i help you|what can i help)[\s\S]{0,200}?(\n---\n|\n\n|\. |! |\? )'
+                    formatted = re.sub(greeting_pattern, '', formatted, count=1, flags=re.IGNORECASE | re.DOTALL)
+                    
+                    # 2. Format thinking tags as quoted blocks
                     def _format_thinking(m):
                         content = m.group(1).strip()
                         if not content:
@@ -168,9 +176,13 @@ class SessionCog(commands.Cog):
                     try:
                         if len(formatted) <= 1900:
                             await channel.send(formatted)
+                            anything_sent = True
                         else:
-                            await channel.send(formatted[:1900])
-                        anything_sent = True
+                            # Send ALL of formatted in 1900-char chunks (no data loss)
+                            for i in range(0, len(formatted), 1900):
+                                await channel.send(formatted[i:i+1900])
+                                await asyncio.sleep(0.4)
+                                anything_sent = True
                     except Exception as e:
                         logger.error(f"Flush error: {e}")
                     
@@ -201,11 +213,12 @@ class SessionCog(commands.Cog):
                         if chunk:
                             pending += chunk
                             full_response += chunk
-                            # Flush on natural breaks or periodically
+                            # Flush on natural breaks or before hitting 1900
                             should_flush = (
                                 pending.endswith("\n\n")
                                 or pending.endswith("</thinking>")
                                 or (len(pending) > 350 and "\n" in pending[-30:])
+                                or len(pending) > 1700  # Force flush before hitting 1900 limit
                             )
                             if should_flush:
                                 await _flush()

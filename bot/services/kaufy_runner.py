@@ -421,35 +421,20 @@ class KaufyRunner:
                 env=self._bot_env(user_home)
             )
 
-            raw_buffer = ""
             full_response = ""
-            prev_cleaned = ""  # Track what we've already yielded
 
-            # Read stdout chunk by chunk — yield only NEW text each time
+            # Read stdout chunk by chunk — yield RAW chunks without stripping.
+            # Preamble stripping is done in sessions.py _flush() to avoid
+            # delta-tracking bugs when stripping changes between chunks.
             while True:
                 chunk = await self.process.stdout.read(400)
                 if not chunk:
                     break
                 decoded = chunk.decode()
-                raw_buffer += decoded
                 full_response += decoded
 
-                # Strip preamble from the accumulated buffer
-                cleaned = self._strip_opencode_preamble(raw_buffer)
-                if not cleaned:
-                    continue  # Only preamble so far, skip
-
-                # Calculate delta (only new text since last yield)
-                if cleaned.startswith(prev_cleaned):
-                    new_text = cleaned[len(prev_cleaned):]
-                else:
-                    # Preamble detection changed — send all current content
-                    new_text = cleaned
-                
-                prev_cleaned = cleaned
-
-                if new_text.strip():
-                    yield {"type": "chunk", "text": new_text}
+                if decoded.strip():
+                    yield {"type": "chunk", "text": decoded}
 
             exit_code = await self.process.wait()
 
