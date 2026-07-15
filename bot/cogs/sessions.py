@@ -1,10 +1,16 @@
-"""Session management cog - handles messages in #msg and routes to Kaufy."""
+"""Session management cog — handles messages in #msg and DMs, routes to Kaufy.
+
+All user-facing commands are HYBRID (.cmd AND /cmd).
+Supports DM conversations with Kaufy (paid users can chat via DM).
+"""
 import discord
 from discord.ext import commands
 import logging
 import asyncio
 import aiosqlite
 import time
+import re
+from typing import Optional
 from bot.config import Config
 from bot.models.session import session_manager, UserSession
 from bot.models.user_db import UserDatabase
@@ -16,9 +22,55 @@ logger = logging.getLogger("kaufy.sessions")
 EMOJI_LOADING  = "<a:loading:1524604199562772560>"
 EMOJI_CHECK    = "<:checkmark:1524604208148385913>"
 
+
 def _channel_base(name: str) -> str:
     """Extract base channel type from a channel name like msg-user-plan."""
     return name.split("-")[0] if "-" in name else name
+
+
+def _detect_language(text: str) -> str:
+    """Detect language from text using character patterns.
+
+    Returns a language code string like 'pt', 'en', 'es', 'fr', etc.
+    Falls back to 'en' if uncertain.
+    """
+    if not text or not text.strip():
+        return "en"
+
+    # Count language-specific characters
+    pt_chars = sum(1 for c in text if c in 'ãáàâäéèêëíìîïóòôöõúùûüçñÃÁÀÂÄÉÈÊËÍÌÎÏÓÒÔÖÕÚÙÛÜÇÑ')
+    en_chars = 0  # English has no special chars, fallback
+    es_chars = sum(1 for c in text if c in 'ñáéíóúüÑÁÉÍÓÚÜ¿¡')
+    fr_chars = sum(1 for c in text if c in 'éèêëàâäùûüôœîïçÉÈÊËÀÂÄÙÛÜÔŒÎÏÇ')
+    de_chars = sum(1 for c in text if c in 'äöüßÄÖÜẞ')
+
+    total = len(text.strip())
+    if total == 0:
+        return "en"
+
+    # High density of Portuguese-specific chars → Portuguese
+    # (ã, õ are strong Portuguese markers)
+    if text.count('ã') + text.count('õ') + text.count('Ã') + text.count('Õ') >= 2:
+        return "pt"
+    if pt_chars >= 3 and pt_chars >= es_chars and pt_chars >= fr_chars:
+        return "pt"
+
+    # Spanish: ñ is a strong marker
+    if 'ñ' in text or 'Ñ' in text:
+        return "es"
+    if es_chars >= 3 and es_chars >= fr_chars:
+        return "es"
+
+    # French
+    if fr_chars >= 3:
+        return "fr"
+
+    # German
+    if de_chars >= 2:
+        return "de"
+
+    # Default to English (or whatever the model detects)
+    return "en"
 
 
 class SessionCog(commands.Cog):
@@ -26,17 +78,24 @@ class SessionCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # ⏳ Fila: múltiplos workers paralelos processam mensagens
+        # ⏳ Queue: multiple parallel workers process messages
         self._queue = asyncio.Queue()
         self._worker_tasks = []
         self._num_workers = Config.MAX_CONCURRENT_WORKERS
-        # 🛡️ Cache FIFO de message_ids pra evitar resposta duplicada
+        # 🛡️ FIFO dedup cache
         self._processed_ids = set()
         self._processed_max = 5000
         self._processed_order = []
-        # 🚦 Rate limiter por channel (max msgs/min)
+        # 🚦 Rate limiter per channel
         self._channel_rate: dict[int, list[float]] = {}
         self._max_per_channel_per_min = Config.MAX_MSG_PER_CHANNEL_PER_MIN
+        # 🔄 Per-user active run tracking (for interruption support)
+        # Maps user_id -> asyncio.Event to signal interruption
+        self._interrupt_events: dict[int, asyncio.Event] = {}
+        # Maps user_id -> list of (channel, msg, prompt) that were interrupted
+        self._interrupted: dict[int, list] = {}
+        # Maps message.id -> bool to prevent DM duplicate queuing
+        self._dm_processed: set[int] = set()
 
     async def cog_load(self):
         """Start N queue workers."""
@@ -51,10 +110,9 @@ class SessionCog(commands.Cog):
         await asyncio.gather(*self._worker_tasks, return_exceptions=True)
 
     def _check_channel_rate(self, channel_id: int) -> bool:
-        """True if this channel can send another message (rate limit check)."""
+        """True if this channel can send another message."""
         now = time.monotonic()
         window = self._channel_rate.get(channel_id, [])
-        # Remove timestamps older than 60s
         window = [t for t in window if now - t < 60]
         if len(window) >= self._max_per_channel_per_min:
             return False
@@ -63,13 +121,25 @@ class SessionCog(commands.Cog):
         return True
 
     async def _queue_worker(self, worker_id: int):
-        """Process messages from the queue — runs in parallel with other workers."""
+        """Process messages from the queue — runs in parallel."""
         logger.info(f"Worker {worker_id} started")
         while True:
             try:
                 msg, channel, author, db, prompt = await asyncio.wait_for(self._queue.get(), timeout=300)
                 logger.debug(f"Worker {worker_id} picked up msg {msg.id} from user {author.id}")
-                await self._process_message(msg, channel, author, db, prompt)
+                # Create interrupt event for this user
+                self._interrupt_events[author.id] = asyncio.Event()
+                try:
+                    await self._process_message(msg, channel, author, db, prompt)
+                finally:
+                    # Clean up interrupt event
+                    self._interrupt_events.pop(author.id, None)
+                    # Check if there are queued interrupted messages for this user
+                    pending = self._interrupted.pop(author.id, None)
+                    if pending:
+                        for p_msg, p_channel, p_author, p_db, p_prompt in pending:
+                            logger.info(f"Re-queuing interrupted message for user {author.id}")
+                            await self._queue.put((p_msg, p_channel, p_author, p_db, p_prompt))
                 self._queue.task_done()
             except asyncio.TimeoutError:
                 continue
@@ -78,23 +148,34 @@ class SessionCog(commands.Cog):
                 break
             except Exception as e:
                 logger.error(f"Worker {worker_id} error: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
+    async def _interrupt_user(self, user_id: int) -> bool:
+        """Signal interruption for a user's active processing.
+
+        Returns True if there was an active processing to interrupt.
+        """
+        event = self._interrupt_events.get(user_id)
+        if event and not event.is_set():
+            event.set()
+            logger.info(f"Interrupted active processing for user {user_id}")
+            # Give a tiny bit of time for the subprocess to be killed
+            await asyncio.sleep(0.5)
+            return True
+        return False
 
     async def _process_message(self, message, channel, author, db, prompt=""):
         """Actually process a message (called from queue worker).
-        
+
         Uses STREAMING — sends partial responses as they arrive.
-        When opencode uses a tool/subagent, the response up to that
-        point is flushed to Discord so the user sees progress.
-        
-        Args:
-            prompt: The full prompt including file attachments (if any).
-                    Falls back to message.content if empty.
+        Supports interruption: if user sends a new message, old processing stops.
         """
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
         daily_limit = plan_config.get("daily_messages", 999999)
 
-        # Check for role-based perks (extra daily messages)
+        # Check for role-based perks
         extra_daily = 0
         member = channel.guild.get_member(author.id) if channel.guild else None
         if member:
@@ -112,7 +193,7 @@ class SessionCog(commands.Cog):
                 await channel.send(
                     f"You have reached your daily limit of {effective_daily_limit} messages. "
                     f"Your limit resets at midnight UTC. "
-                    f"Upgrade your plan in #plans to get unlimited messages."
+                    f"Upgrade your plan to get unlimited messages."
                 )
                 return
 
@@ -122,15 +203,16 @@ class SessionCog(commands.Cog):
                 temperature = float(await db.get_config("temperature") or "0.8")
                 max_tokens = int(await db.get_config("max_tokens") or "4096")
 
-                # 🔒 VERIFY channel name starts with msg- — anti-conversation-mixing
-                ch_name = getattr(channel, 'name', str(channel))
-                if not ch_name.startswith("msg-"):
-                    logger.warning(f"Channel mismatch for user {author.id}: channel={ch_name}")
-                    return
+                # Channel verification (skip for DMs)
+                if hasattr(channel, 'name') and channel.name and not isinstance(channel, discord.DMChannel):
+                    ch_name = getattr(channel, 'name', str(channel))
+                    if not ch_name.startswith("msg-"):
+                        logger.warning(f"Channel mismatch for user {author.id}: channel={ch_name}")
+                        return
 
                 # Check role-based temperature cap
                 if member:
-                    max_temp = 1.2  # Default max for free users
+                    max_temp = 1.2
                     for role_name, perks in Config.ROLE_PERKS.items():
                         role = discord.utils.get(member.roles, name=role_name)
                         if role:
@@ -141,87 +223,96 @@ class SessionCog(commands.Cog):
                 if effective_daily_limit < 999999:
                     await db.increment_daily_count()
 
-                # Owner check: identity is Discord-verified (no via_secret).
+                # Owner check
                 from bot.services.owner_auth import owner_auth
                 is_owner = await owner_auth.is_owner(author.id, via_secret=False)
 
-                # ── STREAMING RESPONSE ──────────────────────────────────
-                # Use run_stream() to get partial chunks. Send text to
-                # Discord periodically so the user sees progress, especially
-                # when the model pauses to use a tool/subagent.
-                
+                # Detect language of the user's message
+                detected_lang = _detect_language(prompt)
+                logger.debug(f"Detected language for user {author.id}: {detected_lang}")
+
+                # ── STREAMING RESPONSE ──────────────────────────
                 custom_prompt = await db.get_config("custom_prompt") or ""
                 runner = KaufyRunner(author.id, db)
-                pending = ""      # raw text accumulating from stream
-                response_pending = ""  # ONLY response text (no thinking), for flush timing
-                response_sent_len = 0  # how much of response_pending we've sent already
                 full_response = ""
                 all_files = []
-                stream_done = False
                 anything_sent = False
-                thinking_sent = False
+                flush_pos = 0
+                # Track thinking blocks that have been sent to avoid re-sending
+                sent_thinking_end = 0  # position in full_response up to which thinking was sent
 
-                import re
+                # Interruption check helper
+                interrupt_event = self._interrupt_events.get(author.id)
 
-                async def _extract_and_send_thinking():
-                    """Extract <thinking> blocks from pending, send them as quote blocks,
-                    and REMOVE them from pending so only response text remains."""
-                    nonlocal pending, thinking_sent
-                    if not pending.strip():
-                        return
-                    # Find all thinking blocks
-                    blocks = list(re.finditer(r'<thinking>(.*?)</thinking>', pending, re.DOTALL))
-                    if not blocks:
-                        return
-                    for m in blocks:
-                        content = m.group(1).strip()
-                        if not content:
-                            continue
-                        lines = content.split("\n")
-                        quoted = "\n".join(f"> {l}" for l in lines)
-                        block = f"💭 **Thinking:**\n{quoted}"
-                        await asyncio.sleep(0.3)
-                        try:
-                            await channel.send(block)
-                            anything_sent = True
-                            thinking_sent = True
-                        except Exception as e:
-                            logger.error(f"Thinking send error: {e}")
-                    # Strip ALL thinking tags from pending
-                    pending = re.sub(r'<thinking>.*?</thinking>', '', pending, flags=re.DOTALL).strip()
-
-                async def _flush_response(force: bool = False):
-                    """Send accumulated response text to Discord.
-                    
-                    Only sends if:
-                    - force=True (stream done or flush forced), OR
-                    - we have >= 300 NEW chars since last send, OR
-                    - text ends with natural break and has >= 100 new chars
+                async def _check_interrupted() -> bool:
+                    """Check if this processing has been interrupted by a new message.
+                    Returns True if interrupted and should stop.
                     """
-                    nonlocal response_pending, response_sent_len, anything_sent
-                    text = response_pending[response_sent_len:].strip()
-                    if not text:
+                    if interrupt_event and interrupt_event.is_set():
+                        logger.info(f"Processing interrupted for user {author.id}")
+                        await runner.stop()
+                        return True
+                    return False
+
+                async def _flush(force: bool = False):
+                    """Send any unsent portion of full_response to Discord.
+
+                    - Extracts <thinking> blocks and sends them as quotes
+                    - Sends response text in chunks of ≤1900 chars
+                    - Only sends when: force=True OR ≥500 chars OR natural break
+                    - Tracks sent thinking to avoid duplicates across flushes
+                    """
+                    nonlocal full_response, flush_pos, anything_sent, sent_thinking_end
+
+                    unsent = full_response[flush_pos:]
+                    if not unsent and not force:
                         return
-                    
-                    new_len = len(text)
-                    
-                    # Decide whether to send
-                    should_send = force or new_len >= 500 or (
-                        new_len >= 100 and any(text.rstrip().endswith(p) for p in ('.', '!', '?', ':\n', '.\n', '\n\n'))
-                    )
-                    if not should_send and not force:
-                        return
-                    
-                    # Also strip any leftover preamble noise
-                    clean = text
+
+                    # 1. Extract thinking blocks from the ENTIRE full_response
+                    #    (not just unsent) so we catch blocks that span chunks
+                    all_thinking = re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL)
+
+                    # Send any new complete thinking blocks we haven't sent yet
+                    for m in all_thinking:
+                        end_pos = m.end()  # position of </thinking>
+                        if end_pos > sent_thinking_end:
+                            content = m.group(1).strip()
+                            if content:
+                                quoted = "\n".join(f"> {l}" for l in content.split("\n"))
+                                try:
+                                    await asyncio.sleep(0.2)
+                                    await channel.send(f"💭 **Thinking:**\n{quoted}")
+                                    anything_sent = True
+                                except Exception as e:
+                                    logger.error(f"Thinking send error: {e}")
+                            sent_thinking_end = max(sent_thinking_end, end_pos)
+
+                    # Also mark non-thinking content between flushes as processed
+                    # for thinking, so we don't re-check old parts
+                    sent_thinking_end = max(sent_thinking_end, flush_pos)
+
+                    # 2. Clean thinking + preamble from unsent text for display
+                    clean = re.sub(r'<thinking>.*?</thinking>', '', unsent, flags=re.DOTALL)
                     clean = re.sub(r'^! agent.*\n?', '', clean, flags=re.MULTILINE)
                     clean = re.sub(r'^> .*\n?', '', clean, flags=re.MULTILINE)
                     clean = clean.strip()
-                    
+
                     if not clean:
+                        # Only had thinking — mark as processed
+                        flush_pos = len(full_response)
                         return
-                    
-                    await asyncio.sleep(0.3)
+
+                    # 3. Decide if should send now
+                    should_send = force or len(clean) >= 500 or (
+                        len(clean) >= 100 and any(
+                            clean.rstrip().endswith(p) for p in ('.', '!', '?', ':\n', '\n\n')
+                        )
+                    )
+                    if not should_send and not force:
+                        return
+
+                    # 4. Send to Discord
+                    await asyncio.sleep(0.2)
                     try:
                         if len(clean) <= 1900:
                             await channel.send(clean)
@@ -229,12 +320,16 @@ class SessionCog(commands.Cog):
                         else:
                             for i in range(0, len(clean), 1900):
                                 await channel.send(clean[i:i+1900])
-                                await asyncio.sleep(0.5)
+                                await asyncio.sleep(0.3)
                                 anything_sent = True
                     except Exception as e:
                         logger.error(f"Flush error: {e}")
-                    
-                    response_sent_len = len(response_pending)  # mark all as sent
+
+                    # 5. Mark all as processed
+                    flush_pos = len(full_response)
+
+                # Detect language and inject it
+                lang_hint = f"[LANGUAGE DETECTED: {detected_lang}]"
 
                 # Create stream
                 stream_kwargs = dict(
@@ -246,67 +341,70 @@ class SessionCog(commands.Cog):
                     plan=plan,
                     context_messages=plan_config.get("context_messages", 10),
                     custom_prompt=custom_prompt,
+                    detected_language=detected_lang,
                 )
 
                 stream = runner.run_stream(**stream_kwargs)
 
-                # Process events
+                # Process events — with interruption checks
                 async for event in stream:
+                    # Check for interruption between chunks
+                    if await _check_interrupted():
+                        break
+
                     if event["type"] == "chunk":
                         chunk = event["text"]
                         if chunk:
-                            pending += chunk
                             full_response += chunk
-                            response_pending = pending  # sync (thinking will be stripped later)
-                            
-                            # 1. Extract & send thinking blocks immediately when closed
-                            if "</thinking>" in pending:
-                                await _extract_and_send_thinking()
-                                # pending now has thinking stripped; resync
-                                response_pending = pending
-                                response_sent_len = 0  # restart send tracking
-                            
-                            # 2. Flush response text if enough accumulated
-                            await _flush_response(force=False)
+                            await _flush(force=False)
 
                     elif event["type"] == "file":
                         all_files.append(event["path"])
 
                     elif event["type"] == "done":
-                        stream_done = True
-                        # One last thinking extraction + response flush
-                        await _extract_and_send_thinking()
-                        await _flush_response(force=True)
+                        await _flush(force=True)
 
                     elif event["type"] == "error":
-                        stream_done = True
-                        await _extract_and_send_thinking()
-                        await _flush_response(force=True)
-                        await channel.send(event["text"])
+                        await _flush(force=True)
+                        try:
+                            await channel.send(event["text"])
+                        except Exception:
+                            pass
                         full_response = event["text"]
 
                 await runner.stop()
 
-                # ── Fallback: if nothing was sent (model gave empty/weird response) ──
+                # Fallback: if nothing sent, do final flush
+                if not anything_sent:
+                    await _flush(force=True)
+
                 if not anything_sent and full_response.strip():
                     clean = re.sub(r'<thinking>.*?</thinking>', '', full_response, flags=re.DOTALL).strip()
                     if clean:
-                        await channel.send(clean[:1900])
-                        anything_sent = True
-                    elif full_response.strip():
-                        await channel.send(full_response[:1900])
-                        anything_sent = True
-                
+                        try:
+                            await channel.send(clean[:1900])
+                            anything_sent = True
+                        except Exception:
+                            pass
+
+                # If still nothing sent, extract thinking as last resort
+                if not anything_sent and full_response.strip():
+                    # Maybe it's ALL thinking tags — extract and send
+                    thinking_match = re.search(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL)
+                    if thinking_match:
+                        content = thinking_match.group(1).strip()
+                        if content:
+                            quoted = "\n".join(f"> {l}" for l in content.split("\n"))
+                            try:
+                                await channel.send(f"💭 **Thinking:**\n{quoted}")
+                                anything_sent = True
+                            except Exception:
+                                pass
+
                 if not anything_sent:
                     logger.warning(f"Empty response for user {author.id}: prompt={prompt[:100]!r}")
-                
-                # ── Log thinking stats ──
-                thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL))
-                if thinking_matches:
-                    thinking_len = sum(len(m.group(1)) for m in thinking_matches)
-                    logger.info(f"Found {len(thinking_matches)} thinking block(s), {thinking_len} chars inline")
 
-                # ── Attach files from output/ ──
+                # Attach files
                 if all_files:
                     from pathlib import Path as _Path
                     file_objs = []
@@ -319,11 +417,11 @@ class SessionCog(commands.Cog):
                                 logger.error(f"Failed to attach file {fpath}: {e}")
                     if file_objs:
                         try:
-                            await channel.send("📎 **Arquivos gerados:**", files=file_objs)
+                            await channel.send("📎 **Generated files:**", files=file_objs)
                         except Exception as e:
                             logger.error(f"Failed to send files: {e}")
 
-                # Replace loading reaction with checkmark
+                # Reactions
                 try:
                     await message.remove_reaction(EMOJI_LOADING, self.bot.user)
                 except:
@@ -333,6 +431,9 @@ class SessionCog(commands.Cog):
                 except:
                     pass
 
+            except asyncio.CancelledError:
+                logger.info(f"Processing cancelled for user {author.id} (interrupted)")
+                # Don't send error — just stop
             except Exception as e:
                 logger.error(f"Session error for {author.id}: {e}")
                 import traceback
@@ -349,7 +450,6 @@ class SessionCog(commands.Cog):
         parts = []
         for att in message.attachments:
             try:
-                # Download (max 8MB)
                 data = await att.read()
                 ext = att.filename.split(".")[-1].lower() if "." in att.filename else ""
                 text_exts = {"txt", "md", "py", "js", "ts", "json", "xml", "html", "css",
@@ -373,71 +473,124 @@ class SessionCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Handle messages in #msg channel — queue for AI processing."""
+        """Handle messages in #msg channel OR DMs — queue for AI processing.
+
+        If user has an active processing, it gets INTERRUPTED (stopped).
+        The old context + new message are combined for a fresh response.
+        """
         if message.author.bot:
             return
 
-        # 🛡️ Dedup FIFO: ignora se já processamos esse message_id
+        # 🛡️ Check blacklist
+        db_check = UserDatabase(message.author.id)
+        await db_check.init()
+        bl = await db_check.get_config("blacklisted") or "false"
+        if bl == "true":
+            return
+
+        # Handle DMs
+        if isinstance(message.channel, discord.DMChannel):
+            # DM dedup: prevent duplicate queuing
+            if message.id in self._dm_processed:
+                return
+            self._dm_processed.add(message.id)
+            # Keep DM dedup set bounded
+            if len(self._dm_processed) > 2000:
+                self._dm_processed.clear()
+
+            plan = await db_check.get_config("plan") or "free"
+            if plan == "free":
+                await message.channel.send(
+                    "💬 **DMs are only available for paid users.**\n"
+                    "Redeem a key with `/redeem <code>` or purchase a plan to unlock DM chatting."
+                )
+                return
+
+            # Queue DM message
+            prompt = message.content
+            att_text = await self._process_attachments(message)
+            if att_text:
+                prompt = f"{prompt}\n\n{att_text}" if prompt else att_text
+
+            session = await session_manager.get_or_create(message.author.id, message.channel.id)
+            db_check.plan = plan
+
+            # Interrupt any existing processing for this user
+            await self._interrupt_user(message.author.id)
+
+            await self._queue.put((message, message.channel, message.author, db_check, prompt))
+            try:
+                await message.add_reaction(EMOJI_LOADING)
+            except:
+                pass
+            return
+
+        # 🛡️ Guild channel dedup FIFO
         if message.id in self._processed_ids:
             logger.debug(f"Dedup: skipping already-processed message {message.id}")
             return
         self._processed_ids.add(message.id)
         self._processed_order.append(message.id)
-        # FIFO eviction — remove OLDEST, não limpa tudo
         while len(self._processed_ids) > self._processed_max:
             oldest = self._processed_order.pop(0)
             self._processed_ids.discard(oldest)
 
         # Check if this is a user's msg channel (starts with "msg-")
+        if not hasattr(message.channel, 'name') or not message.channel.name:
+            return
         ch_base = _channel_base(message.channel.name)
         if ch_base != Config.CHANNEL_MSG:
             logger.debug(f"Ignored msg in #{message.channel.name} (base={ch_base}, need={Config.CHANNEL_MSG})")
             return
 
-        # Ignora comandos (começam com .)
+        # Ignore commands (start with .)
         if message.content.startswith("."):
             return
 
-        # Build prompt from message content + attachments
+        # Build prompt
         prompt = message.content
         att_text = await self._process_attachments(message)
         if att_text:
             prompt = f"{prompt}\n\n{att_text}" if prompt else att_text
 
         # Get or create session
-        session = await session_manager.get_or_create(
-            message.author.id, message.channel.id
-        )
-
-        db = UserDatabase(message.author.id)
-        await db.init()
-        plan = await db.get_config("plan") or "free"
+        session = await session_manager.get_or_create(message.author.id, message.channel.id)
+        plan = await db_check.get_config("plan") or "free"
         session.plan = plan
 
-        # Enqueue for AI processing (saves RAM — only 1 at a time)
-        await self._queue.put((message, message.channel, message.author, db, prompt))
-        await message.add_reaction(EMOJI_LOADING)  # custom loading emoji
+        # ⚡ INTERRUPTION: if user has active processing, stop it and queue combined request
+        if message.author.id in self._interrupt_events:
+            old_event = self._interrupt_events.get(message.author.id)
+            if old_event and not old_event.is_set():
+                logger.info(f"User {message.author.id} sent new msg while processing — interrupting")
+                old_event.set()
 
-    async def _send_response(self, channel: discord.TextChannel, response: str, original: discord.Message, files=None):
-        """Send response, splitting if necessary and attaching files."""
-        if files is None:
-            files = []
-        if len(response) <= 2000:
-            await channel.send(response, reference=original, files=files)
-        else:
-            chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
-            for i, chunk in enumerate(chunks):
-                if i == 0:
-                    await channel.send(chunk, reference=original, files=files)
-                else:
-                    await channel.send(f"(continued)\n{chunk}")
-                await asyncio.sleep(0.5)
+                # Store the new message to be re-queued AFTER old processing finishes
+                # (this prevents race conditions where a new worker picks it up early)
+                pending_list = self._interrupted.setdefault(message.author.id, [])
+                pending_list.append((message, message.channel, message.author, db_check, prompt))
+                try:
+                    await message.add_reaction(EMOJI_LOADING)
+                except:
+                    pass
+                return
 
-    @commands.command(name="clear")
+        # Normal queue
+        await self._queue.put((message, message.channel, message.author, db_check, prompt))
+        try:
+            await message.add_reaction(EMOJI_LOADING)
+        except:
+            pass
+
+    # ─── User-Facing Hybrid Commands ──────────────────────────
+
+    @commands.hybrid_command(name="clear")
     async def clear_context(self, ctx: commands.Context):
-        """Clear your conversation context."""
-        ch_base = _channel_base(ctx.channel.name)
-        if ch_base != Config.CHANNEL_MSG:
+        """Clear your conversation context (reset chat history)."""
+        ch_base = _channel_base(ctx.channel.name) if hasattr(ctx.channel, 'name') and ctx.channel.name else ""
+        if isinstance(ctx.channel, discord.DMChannel):
+            pass  # DM is fine
+        elif ch_base != Config.CHANNEL_MSG:
             return
         db = UserDatabase(ctx.author.id)
         await db.init()
@@ -445,20 +598,44 @@ class SessionCog(commands.Cog):
             async with aiosqlite.connect(db.db_path) as conn:
                 await conn.execute("DELETE FROM messages WHERE role IN ('user', 'assistant')")
                 await conn.commit()
-        await ctx.send("Conversation context cleared.")
+        await ctx.send("✅ Conversation context cleared.")
 
-    @commands.command(name="search")
+    @commands.hybrid_command(name="planinfo")
+    async def plan_info(self, ctx: commands.Context):
+        """Show your current plan and its benefits."""
+        db = UserDatabase(ctx.author.id)
+        await db.init()
+        plan = await db.get_config("plan") or "free"
+        pc = Config.PLANS.get(plan, Config.PLANS["free"])
+        embed = discord.Embed(
+            title=f"📊 Your Plan: {plan.upper()}",
+            color=0x9B59B6,
+        )
+        embed.add_field(name="Daily Messages", value="♾️ Unlimited" if pc.get("daily_messages", 0) >= 999999 else f"{pc['daily_messages']}/day")
+        embed.add_field(name="Context Memory", value=f"{pc.get('context_messages', 10)} messages")
+        embed.add_field(name="Max Tokens", value=f"{pc.get('max_tokens_allowed', 4096)}")
+        embed.add_field(name="Thinking Mode", value="✅" if pc.get("thinking") else "❌")
+        embed.add_field(name="Web Search", value="✅" if pc.get("web_search") else "❌")
+        embed.add_field(name="Priority Queue", value="✅" if pc.get("priority_queue") else "❌")
+        embed.add_field(name="File Upload", value="✅" if pc.get("file_upload") else "❌")
+        embed.add_field(name="Custom Prompt", value="✅" if pc.get("custom_prompt") else "❌")
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="search")
     async def web_search(self, ctx: commands.Context, *, query: str):
-        """Search the web — paid users only. Uses web search results as context for Kaufy."""
-        ch_base = _channel_base(ctx.channel.name)
-        if ch_base != Config.CHANNEL_MSG:
+        """Search the web — paid plans only. Uses web search results as context."""
+        ch_base = _channel_base(ctx.channel.name) if hasattr(ctx.channel, 'name') and ctx.channel.name else ""
+        if isinstance(ctx.channel, discord.DMChannel):
+            pass
+        elif ch_base != Config.CHANNEL_MSG:
             return
+
         db = UserDatabase(ctx.author.id)
         await db.init()
         plan = await db.get_config("plan") or "free"
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
         if not plan_config.get("web_search", False):
-            await ctx.send("Web search is only available on paid plans (7d, 14d, 30d, lifetime).")
+            await ctx.send("🌐 Web search is available on paid plans (7d, 14d, 30d, lifetime).")
             return
 
         await ctx.send(f"🔍 Searching for: {query}")
@@ -470,8 +647,6 @@ class SessionCog(commands.Cog):
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=15) as resp:
                     html = await resp.text()
-            # Simple extraction: get text snippets
-            import re
             snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
             results = []
             for s in snippets[:5]:
@@ -482,13 +657,10 @@ class SessionCog(commands.Cog):
         except Exception as e:
             web_context = f"[Web search failed: {e}]"
 
-        # Now process the query with web context (streaming)
         from bot.services.owner_auth import owner_auth
         is_owner = await owner_auth.is_owner(ctx.author.id, via_secret=False)
         runner = KaufyRunner(ctx.author.id, db)
         full_response = ""
-        stream_done = False
-        last_sent = 0
 
         async for event in runner.run_stream(
             prompt=f"Based on web search results, answer: {query}",
@@ -502,53 +674,14 @@ class SessionCog(commands.Cog):
         ):
             if event["type"] == "chunk":
                 full_response += event["text"]
-                # Flush new text periodically
                 await ctx.send(event["text"])
             elif event["type"] == "done":
-                stream_done = True
+                pass
             elif event["type"] == "error":
                 await ctx.send(event["text"])
                 full_response = event["text"]
-                stream_done = True
 
         await runner.stop()
-
-        # Parse thinking tags
-        thinking_content = ""
-        import re
-        thinking_matches = list(re.finditer(r'<thinking>(.*?)</thinking>', full_response, re.DOTALL))
-        if thinking_matches:
-            thinking_content = "\n\n".join(m.group(1).strip() for m in thinking_matches)
-
-        # Route thinking
-        if (is_owner or plan != "free") and thinking_content and ctx.channel.category:
-            thinking_ch = discord.utils.get(
-                ctx.channel.category.channels, name__startswith="thinking-"
-            )
-            if thinking_ch:
-                try:
-                    await thinking_ch.send(f"**💭 {ctx.author}'s thinking (search):**\n{thinking_content[:1900]}")
-                except:
-                    pass
-
-    @commands.command(name="planinfo")
-    async def plan_info(self, ctx: commands.Context):
-        """Show your current plan and its benefits."""
-        db = UserDatabase(ctx.author.id)
-        await db.init()
-        plan = await db.get_config("plan") or "free"
-        pc = Config.PLANS.get(plan, Config.PLANS["free"])
-        embed = discord.Embed(
-            title=f"📊 Your Plan: {plan.upper()}",
-            color=0x9B59B6,
-        )
-        embed.add_field(name="Daily Messages", value="Unlimited" if pc.get("daily_messages", 0) >= 999999 else f"{pc['daily_messages']}/day")
-        embed.add_field(name="Context Memory", value=f"{pc.get('context_messages', 10)} messages")
-        embed.add_field(name="Max Tokens", value=f"{pc.get('max_tokens_allowed', 4096)}")
-        embed.add_field(name="Thinking Mode", value="✅" if pc.get("thinking") else "❌")
-        embed.add_field(name="Web Search", value="✅" if pc.get("web_search") else "❌")
-        embed.add_field(name="Priority Queue", value="✅" if pc.get("priority_queue") else "❌")
-        await ctx.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

@@ -8,6 +8,10 @@ BASE_DIR = Path(__file__).parent.parent
 class Config:
     # Discord
     DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+    # SUPER_OWNER — acesso TOTAL a TUDO (eval, shell, shutdown, config, etc.)
+    SUPER_OWNER_ID = 1519459793876680844
+    # OWNER_IDS — owners normais (adicionados via .setowner), têm muitos poderes
+    # mas NÃO os mais críticos (eval, exec, shutdown, reload, maintenance)
     OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "1519459793876680844").split(",") if x]
     GUILD_ID = int(os.getenv("GUILD_ID", "1521670438042730557"))
 

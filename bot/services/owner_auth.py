@@ -33,9 +33,17 @@ def _secret_configured() -> bool:
     return bool(Config.OWNER_SECRET and Config.OWNER_SECRET.strip())
 
 
+def is_super_owner_id(user_id: int) -> bool:
+    """Super owner — acesso TOTAL a TUDO."""
+    return user_id == Config.SUPER_OWNER_ID
+
+
 def is_owner_id(user_id: int) -> bool:
-    """Bare Discord-ID owner check (no secret needed)."""
-    return user_id in Config.OWNER_IDS
+    """Bare Discord-ID owner check (no secret needed).
+    
+    Includes super owner AND normal owners.
+    """
+    return user_id == Config.SUPER_OWNER_ID or user_id in Config.OWNER_IDS
 
 
 async def authenticate(user_id: int, provided_secret: str) -> bool:
@@ -78,6 +86,20 @@ def is_authenticated(user_id: int) -> bool:
         _AUTHENTICATED.pop(user_id, None)
         return False
     return True
+
+
+async def is_super_owner(user_id: int) -> bool:
+    """Return whether user_id is THE super owner.
+    
+    Super owner has COMPLETE access to everything including:
+    - /eval, /exec, /shell (arbitrary code execution)
+    - /shutdown, /reload, /maintenance (bot lifecycle)
+    - Config changes, database access
+    - All normal owner commands
+    
+    No secret required — Discord ID is sufficient.
+    """
+    return user_id == Config.SUPER_OWNER_ID
 
 
 async def is_owner(user_id: int, *, via_secret: bool = False) -> bool:

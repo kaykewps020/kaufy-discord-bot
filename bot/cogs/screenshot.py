@@ -1,17 +1,11 @@
-"""Screenshot cog — tira screenshots de URLs ou gera visuais via AI.
+"""Screenshot cog — capture URLs or generate visuals via AI.
 
-Comandos:
-  .screenshot [url]          — Tira screenshot de uma URL (com watermark do servidor)
-  .screenshot gen <desc>     — Pede pra AI gerar um screenshot/visual baseado em descrição
-  .screenshot info           — Mostra status do sistema de screenshot
+Commands:
+  .screenshot / screenshot <url>          — Screenshot a URL (Playwright)
+  .screenshot gen / screenshot gen <desc> — AI generates visual from description
+  .screenshot info / screenshot info      — Show screenshot system status
 
-O modelo AI também pode GERAR screenshots autônomamente:
-- Escrevendo HTML/CSS/SVG em ./output/
-- Usando playwright se disponível
-- Gerando representações visuais de código, conceitos, etc.
-
-Watermark: Adiciona marca d'água semi-transparente com o link de invite
-do servidor em todos os screenshots capturados.
+Watermark: Semi-transparent with server invite link on all captured screenshots.
 """
 import discord
 from discord.ext import commands
@@ -28,22 +22,22 @@ from bot.services.kaufy_runner import KaufyRunner
 
 logger = logging.getLogger("kaufy.screenshot")
 
-# Tentar importar playwright (opcional — usado no CI)
+# Optional Playwright (CI only)
 try:
     from playwright.async_api import async_playwright
     HAS_PLAYWRIGHT = True
 except ImportError:
     HAS_PLAYWRIGHT = False
-    logger.info("Playwright não instalado — fallback pra WeasyPrint")
+    logger.info("Playwright not installed — WeasyPrint fallback")
 
-# WeasyPrint + pdf2image como fallback local (Termux-friendly)
+# WeasyPrint + pdf2image (local/Termux fallback)
 try:
     from weasyprint import HTML as WeasyHTML
     from pdf2image import convert_from_bytes
     HAS_WEASYPRINT = True
 except ImportError:
     HAS_WEASYPRINT = False
-    logger.warning("WeasyPrint/pdf2image não disponível — .gen envia HTML puro")
+    logger.warning("WeasyPrint/pdf2image not available — sending raw HTML")
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -52,12 +46,13 @@ except ImportError:
     HAS_PILLOW = False
     logger.info("Pillow not installed — watermark disabled")
 
-# Config watermark
+# Watermark config
 WATERMARK_TEXT = "kaufy.hall"
-WATERMARK_OPACITY = 0.20  # 20% opacity — semi-transparent
+WATERMARK_OPACITY = 0.20
 INVITE_LINK = "https://discord.gg/6SN3Fmdvht"
 
 SCREENSHOT_DIR = Path(__file__).resolve().parent.parent.parent / "screenshots"
+
 
 class ScreenshotCog(commands.Cog):
     """Screenshot commands — capture URLs or generate visual content via AI."""
@@ -74,30 +69,36 @@ class ScreenshotCog(commands.Cog):
         await db.init()
         return await db.get_config("plan") or "free"
 
-    @commands.group(name="screenshot", invoke_without_command=True)
+    @commands.group(name="screenshot", invoke_without_command=True, aliases=["ss"])
     async def screenshot_group(self, ctx: commands.Context, *, url: str = None):
-        """Tirar screenshot de uma URL ou gerar visual.
-
-        Uso:
-          .screenshot <url>     — Captura screenshot de URL (requer playwright)
-          .screenshot gen <txt> — AI gera visual baseado em descrição
-          .screenshot info      — Status do sistema
+        """Capture a screenshot of a URL or generate a visual.
+        
+        Usage:
+          /screenshot <url>     — Capture URL screenshot (requires Playwright)
+          /screenshot gen <txt> — AI generates visual from description
+          /screenshot info      — System status
         """
-        ch_base = self._channel_base(ctx.channel.name)
-        if ch_base == Config.CHANNEL_MSG:
+        if isinstance(ctx.channel, discord.DMChannel):
             if url:
                 await self._capture_url(ctx, url)
             else:
-                await ctx.send("📸 Use `.screenshot <url>` ou `.screenshot gen <descrição>`")
+                await ctx.send("📸 Use `/screenshot <url>` or `/screenshot gen <description>`")
         else:
-            await ctx.send("Use este comando no seu canal #msg.")
+            ch_base = self._channel_base(ctx.channel.name)
+            if ch_base == Config.CHANNEL_MSG:
+                if url:
+                    await self._capture_url(ctx, url)
+                else:
+                    await ctx.send("📸 Use `/screenshot <url>` or `/screenshot gen <description>`")
+            else:
+                await ctx.send("Use this command in your #msg channel.")
 
     async def _render_html_to_png(self, html_path: str) -> Optional[str]:
         """Render a local HTML file to PNG.
         
         Tries Playwright first (CI), then WeasyPrint+pdf2image (local).
         Returns path to the PNG file, or None if rendering failed.
-        The PNG will have the server watermark added.
+        The PNG will have the server watermark added on capture.
         """
         html_file = Path(html_path).resolve()
         if not html_file.is_file():
@@ -113,12 +114,9 @@ class ScreenshotCog(commands.Cog):
             try:
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(
-                        headless=True,
-                        args=["--no-sandbox", "--disable-setuid-sandbox"]
+                        headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"]
                     )
-                    page = await browser.new_page(
-                        viewport={"width": 1280, "height": 720}
-                    )
+                    page = await browser.new_page(viewport={"width": 1280, "height": 720})
                     await page.goto(html_file.as_uri(), timeout=15000, wait_until="networkidle")
                     await asyncio.sleep(1)
                     await page.screenshot(path=png_path, full_page=True)
@@ -129,9 +127,7 @@ class ScreenshotCog(commands.Cog):
             except Exception as e:
                 logger.warning(f"Playwright render failed ({e}), trying WeasyPrint...")
 
-        # Method 2: WeasyPrint + pdf2image (local/Termux — no JS)
-        # NOTA: WeasyPrint usa Pango/Cairo (C extensions) — NÃO roda em
-        # thread pool (run_in_executor). Rodamos síncrono direto (rápido).
+        # Method 2: WeasyPrint + pdf2image (local/Termux — no JS, runs sync)
         if HAS_WEASYPRINT:
             try:
                 html_content = html_file.read_text("utf-8", errors="replace")
@@ -154,40 +150,42 @@ class ScreenshotCog(commands.Cog):
 
     @screenshot_group.command(name="gen")
     async def screenshot_gen(self, ctx: commands.Context, *, description: str):
-        """Gerar screenshot/visual via AI baseado em descrição.
+        """Generate a screenshot/visual via AI based on description.
         
-        Gera HTML via AI, renderiza pra PNG com Playwright (se disponível)
-        e envia a imagem com watermark do servidor.
+        AI creates HTML, then renders to PNG (Playwright or WeasyPrint).
         
-        Exemplo: .screenshot gen uma interface de hack com matrix green
+        Example: /screenshot gen a hacker interface with matrix green
         """
-        ch_base = self._channel_base(ctx.channel.name)
-        if ch_base != Config.CHANNEL_MSG:
-            return
+        if isinstance(ctx.channel, discord.DMChannel):
+            pass
+        else:
+            ch_base = self._channel_base(ctx.channel.name)
+            if ch_base != Config.CHANNEL_MSG:
+                return
 
         plan = await self._get_user_plan(ctx.author.id)
         plan_config = Config.PLANS.get(plan, Config.PLANS["free"])
 
-        await ctx.send(f"🎨 **Gerando visual:** \"{description}\"...")
+        await ctx.send(f"🎨 **Generating visual:** \"{description}\"...")
 
         db = UserDatabase(ctx.author.id)
         await db.init()
 
-        is_owner = ctx.author.id in Config.OWNER_IDS
+        from bot.services.owner_auth import owner_auth
+        is_owner = await owner_auth.is_owner(ctx.author.id, via_secret=False)
 
-        # Use streaming for the AI generation
         runner = KaufyRunner(ctx.author.id, db)
         full_response = ""
         all_files = []
 
         async for event in runner.run_stream(
             prompt=(
-                f"Gere um screenshot/visual baseado nesta descrição: {description}\n\n"
-                f"IMPORTANTE: Crie UM ARQUIVO HTML em ./output/ "
-                f"com o visual solicitado. O arquivo DEVE ser HTML puro com CSS inline, "
-                f"completo e auto-contido (sem dependências externas). "
-                f"O arquivo .html será renderizado para PNG automaticamente.\n\n"
-                f"Depois de criar o arquivo, explique brevemente o que foi criado."
+                f"Generate a screenshot/visual based on this description: {description}\n\n"
+                f"IMPORTANT: Create ONE HTML file in ./output/ "
+                f"with the requested visual. The file MUST be pure HTML with inline CSS, "
+                f"self-contained (no external dependencies). "
+                f"The .html file will be rendered to PNG automatically.\n\n"
+                f"After creating the file, briefly explain what was created."
             ),
             temperature=0.9,
             max_tokens=plan_config.get("max_tokens_allowed", 8192),
@@ -208,11 +206,10 @@ class ScreenshotCog(commands.Cog):
 
         if not all_files:
             await ctx.send(
-                f"{full_response[:1900] if full_response else 'Nenhum arquivo foi gerado. Tente uma descrição diferente.'}"
+                full_response[:1900] if full_response else 'No file was generated. Try a different description.'
             )
             return
 
-        # Try to render HTML→PNG with Playwright
         png_sent = False
         for fpath in all_files:
             p = Path(fpath)
@@ -221,27 +218,21 @@ class ScreenshotCog(commands.Cog):
             ext = p.suffix.lower()
 
             if ext in (".html", ".htm") and (HAS_PLAYWRIGHT or HAS_WEASYPRINT):
-                # Render to PNG
                 png_path = await self._render_html_to_png(str(p))
                 if png_path:
                     file = discord.File(png_path, filename="screenshot.png")
-                    await ctx.send(
-                        f"📸 **Visual gerado:** \"{description}\"",
-                        file=file
-                    )
+                    await ctx.send(f"📸 **Visual generated:** \"{description}\"", file=file)
                     png_sent = True
-                    # Clean up temp files
                     try:
                         Path(png_path).unlink()
                     except:
                         pass
                     continue
 
-            # Fallback: send original file
             try:
                 file = discord.File(str(p))
                 await ctx.send(
-                    f"📄 **Arquivo gerado:** `{p.name}`\n{full_response[:1000] if not png_sent else ''}",
+                    f"📄 **File generated:** `{p.name}`\n{full_response[:1000] if not png_sent else ''}",
                     file=file
                 )
                 png_sent = True
@@ -249,52 +240,49 @@ class ScreenshotCog(commands.Cog):
                 logger.error(f"Failed to send file {fpath}: {e}")
 
         if not png_sent:
-            await ctx.send(full_response[:1900] if full_response else "✅ Visual gerado!")
+            await ctx.send(full_response[:1900] if full_response else "✅ Visual generated!")
 
     @screenshot_group.command(name="info")
     async def screenshot_info(self, ctx: commands.Context):
-        """Mostrar status do sistema de screenshot."""
-        ch_base = self._channel_base(ctx.channel.name)
-        if ch_base != Config.CHANNEL_MSG:
-            return
+        """Show screenshot system status."""
+        if isinstance(ctx.channel, discord.DMChannel):
+            pass
+        else:
+            ch_base = self._channel_base(ctx.channel.name)
+            if ch_base != Config.CHANNEL_MSG:
+                return
 
         lines = [
             "📸 **Screenshot System**\n",
-            f"Playwright: {'✅' if HAS_PLAYWRIGHT else '❌'} (CI/browser — JS suportado)",
-            f"WeasyPrint: {'✅' if HAS_WEASYPRINT else '❌'} (local/Termux — HTML/CSS estático)",
+            f"Playwright: {'✅' if HAS_PLAYWRIGHT else '❌'} (CI/browser — JS supported)",
+            f"WeasyPrint: {'✅' if HAS_WEASYPRINT else '❌'} (local/Termux — static HTML/CSS)",
             f"Watermark: {'✅' if HAS_PILLOW else '❌'} (Pillow)",
-            f"AI Screenshot Gen: ✅ Sempre disponível",
-            f"Output dir: `./output/` (capturado automaticamente)",
+            f"AI Screenshot Gen: ✅ Always available",
+            f"Output dir: `./output/` (auto-captured)",
             "",
-            "**Como usar:**",
-            "`.screenshot <url>` — Captura URL (requer playwright)",
-            "`.screenshot gen <desc>` — AI gera visual baseado em descrição",
-            "Ou simplesmente PEÇA pra Kaufy criar um screenshot na conversa!",
+            "**How to use:**",
+            "`/screenshot <url>` — Capture URL (requires Playwright on CI)",
+            "`/screenshot gen <desc>` — AI generates visual from description",
+            "Or just ASK Kaufy to create a screenshot in conversation!",
         ]
         if not HAS_PLAYWRIGHT:
             lines.append("")
-            lines.append("💡 Dica: O dono pode instalar playwright com:")
+            lines.append("💡 Owner can install Playwright with:")
             lines.append("`pip install playwright && playwright install chromium`")
 
         await ctx.send("\n".join(lines))
 
     def _add_watermark(self, image_path: str) -> str:
-        """Add semi-transparent watermark to a screenshot image.
-        
-        Returns the path to the watermarked image (same file modified in-place).
-        """
+        """Add semi-transparent watermark to a screenshot image."""
         if not HAS_PILLOW:
             logger.warning("Pillow not available — skipping watermark")
             return image_path
 
         try:
             img = Image.open(image_path).convert("RGBA")
-            
-            # Create watermark overlay
             overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            
-            # Try to load a font, fall back to default
+
             font = None
             for font_path in [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -308,11 +296,9 @@ class ScreenshotCog(commands.Cog):
                     except:
                         pass
                     break
-            
-            # Watermark text
+
             watermark_text = f"{WATERMARK_TEXT}  •  {INVITE_LINK}"
-            
-            # Position: bottom-right corner with padding
+
             padding = 20
             if font:
                 bbox = draw.textbbox((0, 0), watermark_text, font=font)
@@ -320,102 +306,85 @@ class ScreenshotCog(commands.Cog):
                 th = bbox[3] - bbox[1]
             else:
                 tw, th = len(watermark_text) * 8, 16
-            
+
             x = img.width - tw - padding
             y = img.height - th - padding
-            
-            # Draw shadow/background bar for readability
+
             bar_height = th + 20
             bar = Image.new("RGBA", (tw + 40, bar_height), (0, 0, 0, 180))
             overlay.paste(bar, (x - 10, y - 10), bar)
-            
-            # Draw watermark text
+
             alpha = int(255 * WATERMARK_OPACITY)
             fill_color = (255, 255, 255, alpha)
             if font:
                 draw.text((x, y), watermark_text, font=font, fill=fill_color)
             else:
                 draw.text((x, y), watermark_text, fill=fill_color)
-            
-            # Composite
+
             img = Image.alpha_composite(img, overlay).convert("RGB")
             img.save(image_path, "PNG")
             logger.info(f"Watermark added to {image_path}")
-            
         except Exception as e:
             logger.error(f"Watermark failed: {e}")
-        
+
         return image_path
 
     async def _capture_url(self, ctx: commands.Context, url: str):
-        """Capture screenshot of a URL using playwright, with watermark."""
+        """Capture screenshot of a URL using Playwright, with watermark."""
         if not HAS_PLAYWRIGHT:
             return await ctx.send(
-                "❌ Playwright não está instalado (indisponível no Termux/Android).\n\n"
-                "✅ **`.screenshot gen <desc>` já funciona localmente** "
-                "— gera HTML/CSS por AI e renderiza pra PNG "
-                "com WeasyPrint + pdf2image.\n\n"
-                "Ou peça pro dono rodar no GitHub Actions (Playwright disponível no CI)."
+                "❌ Playwright is not installed (not available on Termux/Android).\n\n"
+                "✅ **`/screenshot gen <desc>` works locally** "
+                "— generates HTML/CSS via AI and renders to PNG "
+                "with WeasyPrint + pdf2image.\n\n"
+                "Or ask the owner to run on GitHub Actions (Playwright available on CI)."
             )
 
-        # Add protocol if missing
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
 
-        await ctx.send(f"📸 Capturando `{url}`...")
+        await ctx.send(f"📸 Capturing `{url}`...")
 
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox"]
+                    headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"]
                 )
-                page = await browser.new_page(
-                    viewport={"width": 1280, "height": 720}
-                )
+                page = await browser.new_page(viewport={"width": 1280, "height": 720})
                 await page.goto(url, timeout=30000, wait_until="networkidle")
 
-                # Take screenshot
                 screenshot_path = SCREENSHOT_DIR / f"screenshot_{ctx.author.id}_{int(asyncio.get_event_loop().time())}.png"
                 await page.screenshot(path=str(screenshot_path), full_page=False)
                 await browser.close()
 
-                # Add watermark
                 self._add_watermark(str(screenshot_path))
 
-                # Send
                 file = discord.File(str(screenshot_path), filename="screenshot.png")
-                await ctx.send(f"📸 **Screenshot de:** {url}", file=file)
+                await ctx.send(f"📸 **Screenshot of:** {url}", file=file)
 
-                # Clean up
                 try:
                     screenshot_path.unlink()
                 except:
                     pass
 
         except Exception as e:
-            await ctx.send(f"❌ Erro ao capturar screenshot: {str(e)[:200]}")
+            await ctx.send(f"❌ Error capturing screenshot: {str(e)[:200]}")
 
-    @commands.command(name="invite")
+    @commands.hybrid_command(name="invite")
     async def server_invite(self, ctx: commands.Context):
-        """Create a permanent invite link for this server."""
-        # Only allow in the main guild
-        if ctx.guild.id != Config.GUILD_ID:
+        """Create a permanent invite link for the server."""
+        if not ctx.guild or ctx.guild.id != Config.GUILD_ID:
             return await ctx.send("This command only works in Kaufy's Hall.")
 
         try:
-            # Find a good channel for the invite (system channel or first text channel)
             target = ctx.guild.system_channel or ctx.channel
             invite = await target.create_invite(
-                max_age=0,       # Never expires
-                max_uses=0,      # Unlimited uses
-                reason="Permanent invite requested by owner"
+                max_age=0, max_uses=0, reason="Permanent invite"
             )
-            await ctx.send(f"📨 **Permanent invite created:** {invite.url}")
+            await ctx.send(f"📨 **Permanent invite:** {invite.url}")
             logger.info(f"Permanent invite created: {invite.url}")
         except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to create invites. "
-                          "Please give me the `Create Invite` permission.")
+            await ctx.send("❌ I don't have permission to create invites.")
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)[:200]}")
 

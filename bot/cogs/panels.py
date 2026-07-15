@@ -576,14 +576,14 @@ class WelcomeView(discord.ui.View):
         await self._send_panels(channels, plan, interaction.user)
 
         lines = [
-            f"✅ **Canais prontos!**",
-            f"{channels['msg'].mention} — Converse com Kaufy",
-            f"{channels['config'].mention} — Configurações",
+            f"✅ **Channels ready!**",
+            f"{channels['msg'].mention} — Chat with Kaufy",
+            f"{channels['config'].mention} — Settings",
         ]
         if "thinking" in channels:
-            lines.append(f"{channels['thinking'].mention} — Pensamento visível")
+            lines.append(f"{channels['thinking'].mention} — Visible thinking")
         if "plans" in channels:
-            lines.append(f"{channels['plans'].mention} — Planos disponíveis")
+            lines.append(f"{channels['plans'].mention} — Available plans")
 
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
@@ -591,7 +591,7 @@ class WelcomeView(discord.ui.View):
     async def go_config(self, interaction: discord.Interaction, button: discord.ui.Button):
         channels, plan = await self._ensure_user_channels(interaction)
         await interaction.response.send_message(
-            f"⚙️ Ajuste suas configurações em {channels['config'].mention}",
+            f"⚙️ Adjust your settings in {channels['config'].mention}",
             ephemeral=True
         )
 
@@ -601,12 +601,12 @@ class WelcomeView(discord.ui.View):
         if plan == "free":
             channels, _ = await self._ensure_user_channels(interaction)
             await interaction.response.send_message(
-                f"💎 Veja os planos em {channels['plans'].mention}",
+                f"💎 See plans in {channels['plans'].mention}",
                 ephemeral=True
             )
         else:
             await interaction.response.send_message(
-                f"💎 Seu plano **{plan.upper()}** já está ativo — sem restrições!",
+                f"💎 Your **{plan.upper()}** plan is already active — no restrictions!",
                 ephemeral=True
             )
 
@@ -616,7 +616,7 @@ class WelcomeView(discord.ui.View):
         plan = await self._get_user_plan(interaction.user.id)
         if plan != "free":
             return await interaction.response.send_message(
-                "🎁 Você já tem um plano ativo, não precisa de gift!",
+                "🎁 You already have an active plan — no gift needed!",
                 ephemeral=True
             )
         await interaction.response.send_modal(GiftRedeemModal())
@@ -843,7 +843,7 @@ class PlansView(discord.ui.View):
 
         # Create payment record
         payment = await payment_service.create_payment(
-            user_id=self.user_id,
+            user_id=interaction.user.id,
             plan_id=plan_id,
             channel_id=interaction.channel_id
         )
@@ -855,7 +855,7 @@ class PlansView(discord.ui.View):
         svg = svg_crypto_panel(plan_id, plan)
         file = discord.File(io.BytesIO(svg.encode()), filename="payment.svg")
 
-        view = PaymentConfirmView(self.user_id, plan_id, payment["payment_id"])
+        view = PaymentConfirmView(interaction.user.id, plan_id, payment["payment_id"])
         await interaction.response.send_message(
             f"{EMOJI_MONEY} **Payment for {plan['description']}**\n"
             f"{EMOJI_CREDIT} **Payment ID:** `{payment['payment_id']}`\n"
@@ -1160,14 +1160,14 @@ class ThinkingView(discord.ui.View):
 # FACTORY FUNCTIONS
 # ═══════════════════════════════════════════════════════════════
 
-def get_welcome_panel() -> WelcomeView:
+def get_welcome_panel(_user_id: int = None) -> WelcomeView:
     return WelcomeView()
 
-def get_config_panel() -> ConfigView:
+def get_config_panel(_user_id: int = None) -> ConfigView:
     return ConfigView()
 
-def get_plans_panel() -> PlansView:
+def get_plans_panel(_user_id: int = None) -> PlansView:
     return PlansView()
 
-def get_thinking_panel() -> ThinkingView:
+def get_thinking_panel(_user_id: int = None) -> ThinkingView:
     return ThinkingView()

@@ -7,6 +7,7 @@ import sys
 import asyncio
 from bot.config import Config
 from bot.models.session import session_manager
+from bot.models.key_db import key_db
 from bot.services.backup import backup_service
 from bot.services.payment import payment_service
 from bot.cogs.panels import get_welcome_panel, get_config_panel, get_plans_panel, get_thinking_panel, ConfigView, PlansView, ThinkingView
@@ -33,6 +34,10 @@ class KaufyBot(commands.Bot):
     async def setup_hook(self):
         """Initialize bot components."""
         Config.init_dirs()
+
+        # Initialize key database
+        await key_db.init()
+        logger.info("Key database initialized")
 
         # Load cogs
         cogs = [
@@ -62,7 +67,7 @@ class KaufyBot(commands.Bot):
         self.add_view(PlansView())
         self.add_view(ThinkingView())
 
-        # Sync commands
+        # Sync commands globally (avoids duplicating with guild sync)
         await self.tree.sync()
 
     async def on_ready(self):
