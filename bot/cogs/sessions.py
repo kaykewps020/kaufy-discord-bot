@@ -28,6 +28,17 @@ def _channel_base(name: str) -> str:
     return name.split("-")[0] if "-" in name else name
 
 
+def _channel_owner_name(name: str) -> Optional[str]:
+    """Extract the owner's name from a channel name like 'msg-username-plan'.
+
+    Returns the username part (lowercase) or None if it can't be determined.
+    """
+    parts = name.split("-")
+    if len(parts) >= 2:
+        return parts[1].lower()
+    return None
+
+
 def _detect_language(text: str) -> str:
     """Detect language from text using character patterns.
 
@@ -96,6 +107,10 @@ class SessionCog(commands.Cog):
         self._interrupted: dict[int, list] = {}
         # Maps message.id -> bool to prevent DM duplicate queuing
         self._dm_processed: set[int] = set()
+        # 🔓 Channels in "open mode" — anyone can talk, bot responds to all
+        self._open_channels: set[int] = set()
+        # 📝 Stores the current prompt being processed per user (for combining on interrupt)
+        self._active_prompts: dict[int, str] = {}
 
     async def cog_load(self):
         """Start N queue workers."""
@@ -230,6 +245,9 @@ class SessionCog(commands.Cog):
                 # Detect language of the user's message
                 detected_lang = _detect_language(prompt)
                 logger.debug(f"Detected language for user {author.id}: {detected_lang}")
+
+                # Store the active prompt for potential interruption combining
+                self._active_prompts[author.id] = prompt
 
                 # ── STREAMING RESPONSE ──────────────────────────
                 custom_prompt = await db.get_config("custom_prompt") or ""
@@ -442,6 +460,9 @@ class SessionCog(commands.Cog):
                     await channel.send(f"An error occurred: {str(e)[:200]}")
                 except:
                     pass
+            finally:
+                # Clean up active prompt tracking
+                self._active_prompts.pop(author.id, None)
 
     async def _process_attachments(self, message: discord.Message) -> str:
         """Download attachments and return their content as context string."""
@@ -543,6 +564,14 @@ class SessionCog(commands.Cog):
             logger.debug(f"Ignored msg in #{message.channel.name} (base={ch_base}, need={Config.CHANNEL_MSG})")
             return
 
+        # 🔒 Channel open mode: if channel is NOT open, only respond to channel owner
+        if message.channel.id not in self._open_channels:
+            ch_owner = _channel_owner_name(message.channel.name)
+            author_name = str(message.author).lower()
+            if ch_owner and author_name != ch_owner:
+                logger.debug(f"Ignored non-owner msg in closed channel #{message.channel.name}")
+                return
+
         # Ignore commands (start with .)
         if message.content.startswith("."):
             return
@@ -558,15 +587,28 @@ class SessionCog(commands.Cog):
         plan = await db_check.get_config("plan") or "free"
         session.plan = plan
 
-        # ⚡ INTERRUPTION: if user has active processing, stop it and queue combined request
+        # ⚡ INTERRUPTION: if user has active processing, combine old + new and re-queue
         if message.author.id in self._interrupt_events:
             old_event = self._interrupt_events.get(message.author.id)
             if old_event and not old_event.is_set():
-                logger.info(f"User {message.author.id} sent new msg while processing — interrupting")
+                logger.info(f"User {message.author.id} sent new msg while processing — interrupting + combining")
                 old_event.set()
 
+                # Get old prompt and combine with new one
+                old_prompt = self._active_prompts.get(message.author.id, "")
+                if old_prompt:
+                    combined_prompt = (
+                        f"[Mensagem anterior do usuário]: {old_prompt}\n\n"
+                        f"[Nova mensagem do usuário]: {prompt}\n\n"
+                        f"[Combine as duas mensagens em uma resposta só. "
+                        f"O usuário enviou a primeira, depois enviou a segunda "
+                        f"ANTES de você terminar de responder. Responda como se "
+                        f"fosse uma única solicitação combinada.]"
+                    )
+                    prompt = combined_prompt
+                    logger.info(f"Combined old+new prompts for user {author.id}")
+
                 # Store the new message to be re-queued AFTER old processing finishes
-                # (this prevents race conditions where a new worker picks it up early)
                 pending_list = self._interrupted.setdefault(message.author.id, [])
                 pending_list.append((message, message.channel, message.author, db_check, prompt))
                 try:
@@ -583,6 +625,42 @@ class SessionCog(commands.Cog):
             pass
 
     # ─── User-Facing Hybrid Commands ──────────────────────────
+
+    @commands.hybrid_command(name="onc")
+    async def open_channel(self, ctx: commands.Context):
+        """Open your channel so the bot responds to everyone."""
+        ch_base = _channel_base(ctx.channel.name) if hasattr(ctx.channel, 'name') and ctx.channel.name else ""
+        if isinstance(ctx.channel, discord.DMChannel):
+            await ctx.send("This command only works in #msg channels.")
+            return
+        if ch_base != Config.CHANNEL_MSG:
+            return
+        # Only channel owner can open a closed channel
+        ch_owner = _channel_owner_name(ctx.channel.name)
+        author_name = str(ctx.author).lower()
+        if ctx.channel.id not in self._open_channels and ch_owner and author_name != ch_owner:
+            await ctx.send("❌ Só o dono do canal pode usar `.onc`.", ephemeral=True)
+            return
+        self._open_channels.add(ctx.channel.id)
+        await ctx.send("✅ **Channel aberto!** Agora respondo todo mundo aqui.")
+
+    @commands.hybrid_command(name="ofc")
+    async def close_channel(self, ctx: commands.Context):
+        """Close your channel so the bot only responds to you."""
+        ch_base = _channel_base(ctx.channel.name) if hasattr(ctx.channel, 'name') and ctx.channel.name else ""
+        if isinstance(ctx.channel, discord.DMChannel):
+            await ctx.send("This command only works in #msg channels.")
+            return
+        if ch_base != Config.CHANNEL_MSG:
+            return
+        # Only channel owner can close
+        ch_owner = _channel_owner_name(ctx.channel.name)
+        author_name = str(ctx.author).lower()
+        if ch_owner and author_name != ch_owner:
+            await ctx.send("❌ Só o dono do canal pode usar `.ofc`.", ephemeral=True)
+            return
+        self._open_channels.discard(ctx.channel.id)
+        await ctx.send("🔒 **Channel fechado!** Só respondo ao dono do canal.")
 
     @commands.hybrid_command(name="clear")
     async def clear_context(self, ctx: commands.Context):
