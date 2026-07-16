@@ -31,6 +31,8 @@ env:
   OWNER_SECRET: ${{ secrets.OWNER_SECRET }}
   # AI runner: 0 = no per-response timeout (only the 6h job limit applies)
   KAUFY_AI_TIMEOUT: "0"
+  # Workers: 3 = good balance for 2vCPU runner
+  MAX_CONCURRENT_WORKERS: "3"
   # Config
   KAUFY_RESTART_INTERVAL: 19800    # 5h30min (under 6h limit)
   BACKUP_BRANCH: data              # Branch name for DB backups
