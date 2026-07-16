@@ -521,7 +521,7 @@ class SessionCog(commands.Cog):
 
             plan = await db_check.get_config("plan") or "free"
 
-            # 👑 Owners bypass DM plan restriction
+            # 👑 Owners + paid plans bypass DM restriction (free users are blocked)
             from bot.services.owner_auth import owner_auth
             is_owner_dm = await owner_auth.is_owner(message.author.id, via_secret=False)
             if plan == "free" and not is_owner_dm:
