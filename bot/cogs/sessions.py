@@ -520,7 +520,11 @@ class SessionCog(commands.Cog):
                 self._dm_processed.clear()
 
             plan = await db_check.get_config("plan") or "free"
-            if plan == "free":
+
+            # 👑 Owners bypass DM plan restriction
+            from bot.services.owner_auth import owner_auth
+            is_owner_dm = await owner_auth.is_owner(message.author.id, via_secret=False)
+            if plan == "free" and not is_owner_dm:
                 await message.channel.send(
                     "💬 **DMs are only available for paid users.**\n"
                     "Redeem a key with `/redeem <code>` or purchase a plan to unlock DM chatting."

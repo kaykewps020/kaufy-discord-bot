@@ -67,8 +67,16 @@ class KaufyBot(commands.Bot):
         self.add_view(PlansView())
         self.add_view(ThinkingView())
 
+        # 🧹 Clear any stale guild-specific commands from previous deployments
+        # (prevents duplicates when mixed with global commands)
+        guild_obj = discord.Object(id=Config.GUILD_ID)
+        self.tree.clear_commands(guild=guild_obj)
+        await self.tree.sync(guild=guild_obj)
+        logger.info(f"Synced guild commands to guild {Config.GUILD_ID}")
+
         # Sync commands globally (avoids duplicating with guild sync)
         await self.tree.sync()
+        logger.info("Synced global commands")
 
     async def on_ready(self):
         """Called when the bot is ready."""
