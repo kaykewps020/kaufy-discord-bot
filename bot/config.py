@@ -42,9 +42,10 @@ class Config:
     RESTART_INTERVAL = int(os.getenv("RESTART_INTERVAL", "18000"))  # 5h
 
     # Concurrency
-    # GitHub Actions free runners = 2 vCPUs, 7GB RAM. 10 workers overloads it.
-    # 3 workers = good balance: one can generate long images, others stay responsive.
-    MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "3"))
+    # GitHub Actions free runners = 2 vCPUs, 7GB RAM.
+    # Auto-scaler starts with 2 workers, goes up to MAX when queue is deep.
+    # Normal load: 2. Heavy load: up to 8.
+    MAX_CONCURRENT_WORKERS = int(os.getenv("MAX_CONCURRENT_WORKERS", "8"))
     MAX_MSG_PER_CHANNEL_PER_MIN = int(os.getenv("MAX_MSG_PER_CHANNEL_PER_MIN", "15"))
 
     # Channels

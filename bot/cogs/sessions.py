@@ -92,7 +92,12 @@ class SessionCog(commands.Cog):
         # ⏳ Queue: multiple parallel workers process messages
         self._queue = asyncio.Queue()
         self._worker_tasks = []
-        self._num_workers = Config.MAX_CONCURRENT_WORKERS
+        # Worker scaling: dynamic based on queue load
+        self._min_workers = 2
+        self._max_workers = Config.MAX_CONCURRENT_WORKERS  # default 3, up to 10 via env
+        self._target_workers = self._min_workers
+        self._scaler_task = None  # background scaler
+        self._worker_id_counter = 0
         # 🛡️ FIFO dedup cache
         self._processed_ids = set()
         self._processed_max = 5000
@@ -113,16 +118,28 @@ class SessionCog(commands.Cog):
         self._active_prompts: dict[int, str] = {}
 
     async def cog_load(self):
-        """Start N queue workers."""
-        for i in range(self._num_workers):
-            task = asyncio.create_task(self._queue_worker(i))
+        """Start N queue workers + auto-scaler."""
+        # Start with minimum workers
+        for i in range(self._min_workers):
+            self._worker_id_counter += 1
+            task = asyncio.create_task(self._queue_worker(self._worker_id_counter))
             self._worker_tasks.append(task)
-        logger.info(f"Started {self._num_workers} AI queue workers")
+        logger.info(f"Started {self._min_workers} AI queue workers (min={self._min_workers}, max={self._max_workers})")
+        # Start background auto-scaler
+        self._scaler_task = asyncio.create_task(self._auto_scale_workers())
+        logger.info("Started worker auto-scaler")
 
     async def cog_unload(self):
+        if self._scaler_task:
+            self._scaler_task.cancel()
         for t in self._worker_tasks:
             t.cancel()
         await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+        if self._scaler_task:
+            try:
+                await self._scaler_task
+            except asyncio.CancelledError:
+                pass
 
     def _check_channel_rate(self, channel_id: int) -> bool:
         """True if this channel can send another message."""
@@ -179,6 +196,52 @@ class SessionCog(commands.Cog):
             await asyncio.sleep(0.5)
             return True
         return False
+
+    async def _auto_scale_workers(self):
+        """Background task: monitor queue depth and adjust worker count.
+
+        Scales UP when queue grows, scales DOWN when idle.
+        Workers are asyncio tasks; we add/cancel them as needed.
+        """
+        try:
+            while True:
+                await asyncio.sleep(15)
+
+                qsize = self._queue.qsize()
+                current = len(self._worker_tasks)
+
+                # Decide target based on queue depth
+                if qsize >= 6:
+                    target = self._max_workers
+                elif qsize >= 3:
+                    target = min(current + 2, self._max_workers)
+                elif qsize >= 1:
+                    target = max(current, self._min_workers + 1)
+                else:
+                    target = self._min_workers
+
+                target = max(self._min_workers, min(target, self._max_workers))
+
+                if target > current:
+                    to_add = target - current
+                    for _ in range(to_add):
+                        self._worker_id_counter += 1
+                        task = asyncio.create_task(self._queue_worker(self._worker_id_counter))
+                        self._worker_tasks.append(task)
+                    logger.info(f"🔼 Workers: {current}→{target} (queue={qsize})")
+
+                elif target < current:
+                    to_cancel = self._worker_tasks[target:]
+                    for t in to_cancel:
+                        t.cancel()
+                    self._worker_tasks = self._worker_tasks[:target]
+                    logger.info(f"🔽 Workers: {current}→{target} (queue={qsize})")
+        except asyncio.CancelledError:
+            logger.info("Auto-scaler stopped")
+        except Exception as e:
+            logger.error(f"Auto-scaler error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     async def _process_message(self, message, channel, author, db, prompt=""):
         """Actually process a message (called from queue worker).

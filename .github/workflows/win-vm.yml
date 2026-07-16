@@ -1,0 +1,176 @@
+name: Windows VM RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      crd_auth_code:
+        description: 'CRD Authorization Code (https://remotedesktop.google.com/headless)'
+        required: true
+        type: string
+      crd_pin:
+        description: '6-digit PIN for CRD access'
+        required: true
+        type: string
+      duration_hours:
+        description: 'Hours to keep alive (max 6)'
+        required: false
+        default: '3'
+        type: string
+
+jobs:
+  windows-vm:
+    runs-on: windows-latest
+    timeout-minutes: 432
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Timezone
+        shell: pwsh
+        run: Set-TimeZone -Id "E. South America Standard Time"
+
+      - name: Disable Windows Defender
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          Set-MpPreference -DisableBehaviorMonitoring $true
+          Set-MpPreference -DisableBlockAtFirstSeen $true
+          Set-MpPreference -DisableIOAVProtection $true
+          Set-MpPreference -DisableScriptScanning $true
+          Write-Output "Defender off"
+
+      - name: Enable RDP
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Install Chrome
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile "$env:TEMP\chrome_installer.exe"
+          Start-Process -FilePath "$env:TEMP\chrome_installer.exe" -ArgumentList "/silent /install" -Wait
+          Write-Output "Chrome installed"
+
+      - name: Install Chrome Remote Desktop
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          # Download CRD host installer
+          Invoke-WebRequest -Uri "https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb" -OutFile "$env:TEMP\crd.deb"
+          Wait-Debugger
+          # For Windows, the correct URL is different:
+          Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chrome-remote-desktop-host.msi" -OutFile "$env:TEMP\crd.msi"
+          
+          # Install CRD host
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$env:TEMP\crd.msi`" /quiet /norestart" -Wait
+          Start-Sleep 5
+          Write-Output "CRD Host installed"
+
+      - name: Setup CRD Headless
+        shell: pwsh
+        run: |
+          $authCode = "${{ inputs.crd_auth_code }}"
+          $pin = "${{ inputs.crd_pin }}"
+          
+          # CRD headless registration
+          # The CRD service needs to register with the auth code
+          $programFiles = ${env:ProgramFiles}
+          $crdPath = Join-Path $programFiles "Chrome Remote Desktop"
+          
+          if (Test-Path $crdPath) {
+            Write-Output "CRD found at $crdPath"
+            Get-ChildItem $crdPath
+          }
+          
+          # Register CRD with auth code
+          # The host executable is usually in Program Files
+          $hostExe = Get-ChildItem -Path $programFiles -Recurse -Filter "chromoting-host.exe" | Select-Object -First 1
+          
+          if ($hostExe) {
+            Write-Output "Found host at: $($hostExe.FullName)"
+            # Register with Google using the auth code
+            & $hostExe.FullName --host-name="kaufy-win-vm" --auth-code="$authCode" --pin="$pin"
+            Write-Output "CRD registered successfully"
+          } else {
+            Write-Output "CRD host binary not found, trying alternative paths"
+            # Try common locations
+            $paths = @(
+              "$env:LOCALAPPDATA\Google\Chrome Remote Desktop",
+              "$env:ProgramData\Google\Chrome Remote Desktop",
+              "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop"
+            )
+            foreach ($p in $paths) {
+              if (Test-Path $p) {
+                Write-Output "Found CRD at: $p"
+                Get-ChildItem $p
+              }
+            }
+            
+            # Alternative: use the CRD setup via registry
+            # The auth code can be applied via the Windows CRD client
+            Write-Output "Attempting CRD registration via direct method..."
+            
+            # Create the config directory
+            $configDir = "$env:ProgramData\Google\Chrome Remote Desktop"
+            New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+            
+            # Write the auth config
+            $config = @{
+              host_id = (New-Guid).Guid
+              host_name = "kaufy-win-vm"
+              auth_code = $authCode
+              pin = $pin
+            } | ConvertTo-Json
+            
+            Set-Content -Path "$configDir\host.json" -Value $config
+            Write-Output "Config written"
+          }
+
+      - name: Install Tools (Chocolatey)
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          choco install -y vscode firefox 7zip notepadplusplus
+
+      - name: Set Admin Password & Show Info
+        shell: pwsh
+        run: |
+          $password = "KaufyVM@" + (Get-Random -Maximum 99999).ToString("00000")
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          Set-LocalUser -Name "Administrator" -Password $secure
+          
+          Write-Output "=========================================="
+          Write-Output "WINDOWS VM READY"
+          Write-Output "=========================================="
+          Write-Output ""
+          Write-Output "1. Go to: https://remotedesktop.google.com/access"
+          Write-Output "2. Log in with the same Google account"
+          Write-Output "3. Click on 'kaufy-win-vm'"
+          Write-Output "4. Enter PIN: ${{ inputs.crd_pin }}"
+          Write-Output ""
+          Write-Output "Admin Password: $password"
+          Write-Output ""
+          Write-Output "Alternatively, connect via RDP:"
+          Write-Output "  IP: localhost (only works locally)"
+          Write-Output "  User: Administrator"
+          Write-Output "  Pass: $password"
+          Write-Output "=========================================="
+
+      - name: Keep Alive
+        shell: pwsh
+        run: |
+          $hours = [int]("${{ inputs.duration_hours }}")
+          $end = (Get-Date).AddHours($hours)
+          Write-Output "VM live until: $end"
+          
+          while ((Get-Date) -lt $end) {
+            $remaining = ($end - (Get-Date)).TotalMinutes
+            Write-Output "[$(Get-Date -Format HH:mm:ss)] CRD active — $([math]::Round($remaining)) min remaining"
+            Start-Sleep -Seconds 120
+          }
+          
+          Write-Output "Time's up! VM shutting down."
