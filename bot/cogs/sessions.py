@@ -112,8 +112,10 @@ class SessionCog(commands.Cog):
         self._interrupted: dict[int, list] = {}
         # Maps message.id -> bool to prevent DM duplicate queuing
         self._dm_processed: set[int] = set()
-        # 🔓 Channels in "open mode" — anyone can talk, bot responds to all
-        self._open_channels: set[int] = set()
+        # 🔒 Channels in "closed mode" — only owner gets responses
+        # Default: ALL channels are OPEN (anyone can talk, bot responds to all)
+        # Use .ofc to close your channel, .onc to re-open
+        self._closed_channels: set[int] = set()
         # 📝 Stores the current prompt being processed per user (for combining on interrupt)
         self._active_prompts: dict[int, str] = {}
 
@@ -631,13 +633,14 @@ class SessionCog(commands.Cog):
             logger.debug(f"Ignored msg in #{message.channel.name} (base={ch_base}, need={Config.CHANNEL_MSG})")
             return
 
-        # 🔒 Channel open mode: if channel is NOT open, only respond to channel owner
-        if message.channel.id not in self._open_channels:
+        # 🔒 Channel closed mode: if channel is closed, only respond to channel owner
+        if message.channel.id in self._closed_channels:
             ch_owner = _channel_owner_name(message.channel.name)
-            author_name = str(message.author).lower()
-            if ch_owner and author_name != ch_owner:
-                logger.debug(f"Ignored non-owner msg in closed channel #{message.channel.name}")
-                return
+            if ch_owner:
+                author_display = message.author.display_name.lower().replace(" ", "-")[:30]
+                if author_display != ch_owner:
+                    logger.debug(f"Ignored non-owner msg in closed channel #{message.channel.name}")
+                    return
 
         # Ignore commands (start with .)
         if message.content.startswith("."):
@@ -702,13 +705,13 @@ class SessionCog(commands.Cog):
             return
         if ch_base != Config.CHANNEL_MSG:
             return
-        # Only channel owner can open a closed channel
+        # Only channel owner can re-open
         ch_owner = _channel_owner_name(ctx.channel.name)
-        author_name = str(ctx.author).lower()
-        if ctx.channel.id not in self._open_channels and ch_owner and author_name != ch_owner:
+        author_display = ctx.author.display_name.lower().replace(" ", "-")[:30]
+        if ctx.channel.id in self._closed_channels and ch_owner and author_display != ch_owner:
             await ctx.send("❌ Só o dono do canal pode usar `.onc`.", ephemeral=True)
             return
-        self._open_channels.add(ctx.channel.id)
+        self._closed_channels.discard(ctx.channel.id)
         await ctx.send("✅ **Channel aberto!** Agora respondo todo mundo aqui.")
 
     @commands.hybrid_command(name="ofc")
@@ -722,11 +725,11 @@ class SessionCog(commands.Cog):
             return
         # Only channel owner can close
         ch_owner = _channel_owner_name(ctx.channel.name)
-        author_name = str(ctx.author).lower()
-        if ch_owner and author_name != ch_owner:
+        author_display = ctx.author.display_name.lower().replace(" ", "-")[:30]
+        if ch_owner and author_display != ch_owner:
             await ctx.send("❌ Só o dono do canal pode usar `.ofc`.", ephemeral=True)
             return
-        self._open_channels.discard(ctx.channel.id)
+        self._closed_channels.add(ctx.channel.id)
         await ctx.send("🔒 **Channel fechado!** Só respondo ao dono do canal.")
 
     @commands.hybrid_command(name="clear")
